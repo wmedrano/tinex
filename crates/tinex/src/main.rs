@@ -2,6 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
+mod jack;
+use jack::init_jack;
+
 /// tinex CLI
 #[derive(Parser, Debug)]
 #[command(name = "tinex", version, about)]
@@ -14,7 +17,9 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
+    let _client = init_jack()?;
 
+    std::thread::sleep(std::time::Duration::from_secs(10));
     tracing::info!("tinex finished");
     Ok(())
 }
