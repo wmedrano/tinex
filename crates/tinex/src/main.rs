@@ -1,12 +1,11 @@
 use anyhow::Result;
 use clap::Parser;
-use std::time::{Duration, Instant};
 use tracing::info;
 
+mod gui;
 mod jack;
 mod tinex;
 use jack::init_jack;
-use tinex::TinexNotification;
 
 /// tinex CLI
 #[derive(Parser, Debug)]
@@ -26,24 +25,7 @@ fn main() -> Result<()> {
     init_logging(&args);
     let handle = init_jack(args.autoconnect)?;
 
-    let mut window_start = Instant::now();
-    let mut window_peak = 0.0_f32;
-    for _ in 0..1000 {
-        std::thread::sleep(Duration::from_millis(10));
-        for notification in handle.notifications.try_iter() {
-            match notification {
-                TinexNotification::OutputLevel(output_level) => {
-                    window_peak = window_peak.max(output_level);
-                }
-                notification => info!(?notification, "Tinex notification"),
-            }
-        }
-        if window_start.elapsed() >= Duration::from_secs(1) {
-            info!(output_level = window_peak, "Tinex output level");
-            window_peak = 0.0;
-            window_start = Instant::now();
-        }
-    }
+    gui::run(handle)?;
     tracing::info!("tinex finished");
     Ok(())
 }

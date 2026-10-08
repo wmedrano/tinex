@@ -7,9 +7,9 @@ use crate::tinex::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
 
 /// The returned port handles are valid while the JACK client remains active.
 pub struct TinexHandle {
-    pub _client: jack::AsyncClient<SharedNotificationHandler, ProcessHandler>,
+    pub client: jack::AsyncClient<SharedNotificationHandler, ProcessHandler>,
     pub _notification_handler: Arc<NotificationHandler>,
-    pub _requests: mpsc::Sender<TinexRequest>,
+    pub requests: mpsc::Sender<TinexRequest>,
     pub notifications: mpsc::Receiver<TinexNotification>,
 }
 
@@ -29,9 +29,9 @@ pub fn init_jack(autoconnect: bool) -> Result<TinexHandle> {
         process_handler,
     )?;
     Ok(TinexHandle {
-        _client: client,
+        client,
         _notification_handler: notification_handler,
-        _requests: requests,
+        requests,
         notifications,
     })
 }
@@ -72,12 +72,12 @@ impl jack::ProcessHandler for ProcessHandler {
             if let Ok(message) = wmidi::MidiMessage::try_from(event.bytes)
                 && let Some(message) = message.drop_unowned_sysex()
             {
-                messages.push(message);
+                messages.push((event.time as usize, message));
             }
         }
         let args = ProcessArgs {
-            _input: input,
-            _midi_input: messages.into_bump_slice(),
+            input,
+            midi_input: messages.into_bump_slice(),
             output,
             _arena: &self.arena,
         };
@@ -127,9 +127,7 @@ impl NotificationHandler {
         };
         let flags = port.flags();
         if port_type == jack::MidiIn::default().jack_port_type() {
-            if client.is_mine(port)
-                || flags.contains(jack::PortFlags::IS_PHYSICAL | jack::PortFlags::IS_OUTPUT)
-            {
+            if client.is_mine(port) || flags.contains(jack::PortFlags::IS_OUTPUT) {
                 self.autoconnect_midi(client);
             }
             return;
@@ -196,24 +194,25 @@ impl NotificationHandler {
             warn!("Could not determine MIDI input name for autoconnect");
             return;
         };
-        let physical_port_names = client.ports(
+        let port_names = client.ports(
             None,
             Some(jack::MidiIn::default().jack_port_type()),
-            jack::PortFlags::IS_PHYSICAL | jack::PortFlags::IS_OUTPUT,
+            jack::PortFlags::IS_OUTPUT,
         );
-        for physical_port_name in physical_port_names {
-            if self
-                .midi_in
-                .is_connected_to(&physical_port_name)
-                .unwrap_or(false)
-            {
+        for port_name in port_names {
+            let Some(port) = client.port_by_name(&port_name) else {
+                continue;
+            };
+            if client.is_mine(&port) {
                 continue;
             }
-            if let Err(error) = client.connect_ports_by_name(&physical_port_name, &local_port_name)
-            {
+            if self.midi_in.is_connected_to(&port_name).unwrap_or(false) {
+                continue;
+            }
+            if let Err(error) = client.connect_ports_by_name(&port_name, &local_port_name) {
                 warn!(
                     ?error,
-                    physical_port_name, local_port_name, "Could not autoconnect MIDI port"
+                    port_name, local_port_name, "Could not autoconnect MIDI port"
                 );
             }
         }

@@ -1,5 +1,12 @@
 use std::sync::mpsc::{Receiver, Sender};
 
+use wmidi::MidiMessage;
+
+use crate::tinex::track::Track;
+
+pub mod plugin;
+pub mod track;
+
 const TRACK_CAPACITY: usize = 64;
 
 pub struct Tinex {
@@ -24,14 +31,11 @@ pub enum TinexNotification {
 }
 
 pub struct ProcessArgs<'a, 'out> {
-    pub _input: [&'a [f32]; 2],
-    pub _midi_input: &'a [wmidi::MidiMessage<'static>],
+    pub input: [&'a [f32]; 2],
+    pub midi_input: &'a [(usize, MidiMessage<'static>)],
     pub output: [&'out mut [f32]; 2],
     pub _arena: &'a bumpalo::Bump,
 }
-
-#[derive(Debug)]
-pub struct Track {}
 
 impl Tinex {
     pub fn new(requests: Receiver<TinexRequest>, notifications: Sender<TinexNotification>) -> Self {
@@ -74,7 +78,8 @@ impl Tinex {
             channel.fill(0.0);
         }
         for track in self.tracks.iter_mut() {
-            track.process(&mut args.output);
+            let [out_l, out_r] = args.output.each_mut();
+            track.process(args.midi_input, args.input, [out_l, out_r]);
         }
         let output_level = args
             .output
@@ -85,10 +90,6 @@ impl Tinex {
             .notifications
             .send(TinexNotification::OutputLevel(output_level));
     }
-}
-
-impl Track {
-    fn process(&mut self, _out: &mut [&mut [f32]; 2]) {}
 }
 
 #[cfg(test)]
@@ -104,8 +105,8 @@ mod tests {
         let mut left = [1.0; 8];
         let mut right = [1.0; 8];
         tinex.process(ProcessArgs {
-            _input: [&[], &[]],
-            _midi_input: &[],
+            input: [&[], &[]],
+            midi_input: &[],
             output: [&mut left, &mut right],
             _arena: &arena,
         });
@@ -133,8 +134,8 @@ mod tests {
         assert!(process(&mut tinex, &received).is_empty());
 
         tinex.process(ProcessArgs {
-            _input: [&[], &[]],
-            _midi_input: &[],
+            input: [&[], &[]],
+            midi_input: &[],
             output: [&mut [], &mut []],
             _arena: &bumpalo::Bump::new(),
         });
@@ -153,7 +154,9 @@ mod tests {
         let capacity = TRACK_CAPACITY;
         let vector_capacity = tinex.tracks.capacity();
         for _ in 0..capacity {
-            sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+            sender
+                .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+                .unwrap();
         }
         let notifications = process(&mut tinex, &received);
         assert_eq!(notifications.len(), capacity);
@@ -164,19 +167,23 @@ mod tests {
         }
         assert_eq!(tinex.tracks.len(), capacity);
 
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
-            [TinexNotification::TrackCreationFailed(Track {})]
+            [TinexNotification::TrackCreationFailed(Track { .. })]
         ));
         assert_eq!(tinex.tracks.len(), capacity);
         assert_eq!(tinex.tracks.capacity(), vector_capacity);
 
         sender.send(TinexRequest::DeleteTrack(0)).unwrap();
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
-            [TinexNotification::TrackDeleted(Track {}), TinexNotification::TrackCreated(index)]
+            [TinexNotification::TrackDeleted(Track { .. }), TinexNotification::TrackCreated(index)]
                 if *index == capacity - 1
         ));
         assert_eq!(tinex.tracks.len(), capacity);
@@ -188,14 +195,18 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         sender.send(TinexRequest::DeleteTrack(0)).unwrap();
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
             [
                 TinexNotification::TrackCreated(0),
-                TinexNotification::TrackDeleted(Track {}),
+                TinexNotification::TrackDeleted(Track { .. }),
                 TinexNotification::TrackCreated(0)
             ]
         ));
@@ -207,7 +218,7 @@ mod tests {
         sender.send(TinexRequest::DeleteTrack(0)).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
-            [TinexNotification::TrackDeleted(Track {})]
+            [TinexNotification::TrackDeleted(Track { .. })]
         ));
         assert!(tinex.tracks.is_empty());
     }
@@ -218,7 +229,9 @@ mod tests {
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
         sender.send(TinexRequest::DeleteTrack(0)).unwrap();
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         sender.send(TinexRequest::DeleteTrack(usize::MAX)).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
@@ -233,18 +246,20 @@ mod tests {
         let (notifications, received) = mpsc::channel();
         drop(received);
         let mut tinex = Tinex::new(receiver, notifications);
-        sender.send(TinexRequest::NewTrack(Track {})).unwrap();
+        sender
+            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .unwrap();
         drop(sender);
         tinex.process(ProcessArgs {
-            _input: [&[], &[]],
-            _midi_input: &[],
+            input: [&[], &[]],
+            midi_input: &[],
             output: [&mut [], &mut []],
             _arena: &bumpalo::Bump::new(),
         });
         assert_eq!(tinex.tracks.len(), 1);
         tinex.process(ProcessArgs {
-            _input: [&[], &[]],
-            _midi_input: &[],
+            input: [&[], &[]],
+            midi_input: &[],
             output: [&mut [], &mut []],
             _arena: &bumpalo::Bump::new(),
         });
