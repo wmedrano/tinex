@@ -1,61 +1,96 @@
 use anyhow::Result;
 use jack::PortSpec;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use tracing::{error, info, warn};
 
+use crate::tinex::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
+
 /// The returned port handles are valid while the JACK client remains active.
-pub fn init_jack(
-    autoconnect: bool,
-) -> Result<(
-    jack::AsyncClient<SharedNotificationHandler, ProcessHandler>,
-    Arc<NotificationHandler>,
-)> {
+pub struct TinexHandle {
+    pub _client: jack::AsyncClient<SharedNotificationHandler, ProcessHandler>,
+    pub _notification_handler: Arc<NotificationHandler>,
+    pub _requests: mpsc::Sender<TinexRequest>,
+    pub notifications: mpsc::Receiver<TinexNotification>,
+}
+
+pub fn init_jack(autoconnect: bool) -> Result<TinexHandle> {
     let (client, status) = jack::Client::new("tinex", jack::ClientOptions::default())?;
     info!(?client, "Created JACK client");
     if !status.is_empty() {
         warn!(?status, "Got non-empty JACK status.");
     }
 
-    let process_handler = ProcessHandler::new(&client)?;
+    let (requests, receiver) = mpsc::channel();
+    let (notification_sender, notifications) = mpsc::channel();
+    let process_handler = ProcessHandler::new(&client, receiver, notification_sender)?;
     let notification_handler = Arc::new(NotificationHandler::new(&process_handler, autoconnect)?);
     let client = client.activate_async(
         SharedNotificationHandler(Arc::clone(&notification_handler)),
         process_handler,
     )?;
-    Ok((client, notification_handler))
+    Ok(TinexHandle {
+        _client: client,
+        _notification_handler: notification_handler,
+        _requests: requests,
+        notifications,
+    })
 }
 
 pub struct ProcessHandler {
-    midi_in: Vec<jack::Port<jack::MidiIn>>,
-    audio_in: Vec<jack::Port<jack::AudioIn>>,
-    audio_out: Vec<jack::Port<jack::AudioOut>>,
+    tinex: Tinex,
+    arena: bumpalo::Bump,
+    midi_in: jack::Port<jack::MidiIn>,
+    audio_in: [jack::Port<jack::AudioIn>; 2],
+    audio_out: [jack::Port<jack::AudioOut>; 2],
 }
 
 impl ProcessHandler {
-    fn new(client: &jack::Client) -> Result<ProcessHandler> {
+    fn new(
+        client: &jack::Client,
+        requests: mpsc::Receiver<TinexRequest>,
+        notifications: mpsc::Sender<TinexNotification>,
+    ) -> Result<ProcessHandler> {
         Ok(ProcessHandler {
-            midi_in: make_ports(client, jack::MidiIn::default(), "midi-in", 4)?,
-            audio_in: make_ports(client, jack::AudioIn::default(), "audio-in", 2)?,
-            audio_out: make_ports(client, jack::AudioOut::default(), "audio-out", 2)?,
+            tinex: Tinex::new(requests, notifications),
+            arena: bumpalo::Bump::with_capacity(64 * 1024),
+            midi_in: client.register_port("midi-in", jack::MidiIn::default())?,
+            audio_in: make_ports(client, jack::AudioIn::default(), "audio-in")?,
+            audio_out: make_ports(client, jack::AudioOut::default(), "audio-out")?,
         })
     }
 }
 
 impl jack::ProcessHandler for ProcessHandler {
     fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
-        for out in self.audio_out.iter_mut() {
-            let out = out.as_mut_slice(ps);
-            out.fill(0.0);
+        self.arena.reset();
+        let input = self.audio_in.each_ref().map(|port| port.as_slice(ps));
+        let output = self.audio_out.each_mut().map(|port| port.as_mut_slice(ps));
+        let events = self.midi_in.iter(ps);
+        let mut messages =
+            bumpalo::collections::Vec::with_capacity_in(events.size_hint().0, &self.arena);
+        for event in events {
+            if let Ok(message) = wmidi::MidiMessage::try_from(event.bytes)
+                && let Some(message) = message.drop_unowned_sysex()
+            {
+                messages.push(message);
+            }
         }
+        let args = ProcessArgs {
+            _input: input,
+            _midi_input: messages.into_bump_slice(),
+            output,
+            _arena: &self.arena,
+        };
+        self.tinex.process(args);
         jack::Control::Continue
     }
 }
 
 pub struct NotificationHandler {
     autoconnect: bool,
-    pub midi_in: Vec<jack::Port<jack::Unowned>>,
-    pub audio_in: Vec<jack::Port<jack::Unowned>>,
-    pub audio_out: Vec<jack::Port<jack::Unowned>>,
+    pub midi_in: jack::Port<jack::Unowned>,
+    pub audio_in: [jack::Port<jack::Unowned>; 2],
+    pub audio_out: [jack::Port<jack::Unowned>; 2],
 }
 
 /// Adapts the shared handler to JACK's notification callback trait.
@@ -63,21 +98,15 @@ pub struct SharedNotificationHandler(Arc<NotificationHandler>);
 
 impl NotificationHandler {
     fn new(process_handler: &ProcessHandler, autoconnect: bool) -> Result<NotificationHandler> {
-        let midi_in = process_handler
-            .midi_in
-            .iter()
-            .map(|port| port.clone_unowned())
-            .collect();
+        let midi_in = process_handler.midi_in.clone_unowned();
         let audio_in = process_handler
             .audio_in
-            .iter()
-            .map(|port| port.clone_unowned())
-            .collect();
+            .each_ref()
+            .map(|port| port.clone_unowned());
         let audio_out = process_handler
             .audio_out
-            .iter()
-            .map(|port| port.clone_unowned())
-            .collect();
+            .each_ref()
+            .map(|port| port.clone_unowned());
         Ok(NotificationHandler {
             autoconnect,
             midi_in,
@@ -92,19 +121,26 @@ impl NotificationHandler {
             Output,
         }
 
-        if !client.is_mine(port) {
-            return;
-        }
-
-        let Ok(local_port_name) = port.name() else {
-            warn!("Could not determine port name for autoconnect");
-            return;
-        };
         let Ok(port_type) = port.port_type() else {
             warn!("Could not determine port type for autoconnect");
             return;
         };
         let flags = port.flags();
+        if port_type == jack::MidiIn::default().jack_port_type() {
+            if client.is_mine(port)
+                || flags.contains(jack::PortFlags::IS_PHYSICAL | jack::PortFlags::IS_OUTPUT)
+            {
+                self.autoconnect_midi(client);
+            }
+            return;
+        }
+        if !client.is_mine(port) {
+            return;
+        }
+        let Ok(local_port_name) = port.name() else {
+            warn!("Could not determine port name for autoconnect");
+            return;
+        };
         let direction = if flags.contains(jack::PortFlags::IS_INPUT) {
             Direction::Input
         } else if flags.contains(jack::PortFlags::IS_OUTPUT) {
@@ -114,9 +150,7 @@ impl NotificationHandler {
         };
         let local_ports = match direction {
             Direction::Input => {
-                if port_type == jack::MidiIn::default().jack_port_type() {
-                    &self.midi_in
-                } else if port_type == jack::AudioIn::default().jack_port_type() {
+                if port_type == jack::AudioIn::default().jack_port_type() {
                     &self.audio_in
                 } else {
                     return;
@@ -153,6 +187,34 @@ impl NotificationHandler {
                     ?error,
                     physical_port_name, local_port_name, "Could not autoconnect port"
                 ),
+            }
+        }
+    }
+
+    fn autoconnect_midi(&self, client: &jack::Client) {
+        let Ok(local_port_name) = self.midi_in.name() else {
+            warn!("Could not determine MIDI input name for autoconnect");
+            return;
+        };
+        let physical_port_names = client.ports(
+            None,
+            Some(jack::MidiIn::default().jack_port_type()),
+            jack::PortFlags::IS_PHYSICAL | jack::PortFlags::IS_OUTPUT,
+        );
+        for physical_port_name in physical_port_names {
+            if self
+                .midi_in
+                .is_connected_to(&physical_port_name)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Err(error) = client.connect_ports_by_name(&physical_port_name, &local_port_name)
+            {
+                warn!(
+                    ?error,
+                    physical_port_name, local_port_name, "Could not autoconnect MIDI port"
+                );
             }
         }
     }
@@ -253,14 +315,11 @@ fn make_ports<PS: Clone + jack::PortSpec>(
     client: &jack::Client,
     spec: PS,
     prefix: &str,
-    count: usize,
-) -> Result<Vec<jack::Port<PS>>, jack::Error> {
-    (0..count)
-        .map(|index| {
-            let name = format!("{prefix}-{index}");
-            client.register_port(&name, spec.clone())
-        })
-        .collect()
+) -> Result<[jack::Port<PS>; 2], jack::Error> {
+    Ok([
+        client.register_port(&format!("{prefix}-0"), spec.clone())?,
+        client.register_port(&format!("{prefix}-1"), spec)?,
+    ])
 }
 
 fn log_port(client: &jack::Client, port_id: jack::PortId) -> String {

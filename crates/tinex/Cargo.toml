@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+bumpalo = { version = "3.20.3", features = ["collections"] }
 clap = { version = "4", features = ["derive"] }
 jack = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wmidi = "4.0.11"
