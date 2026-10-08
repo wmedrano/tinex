@@ -12,12 +12,16 @@ struct Args {
     /// Log level or filter directives (e.g. trace, debug, info, warn, error, `tinex=debug,warn`)
     #[arg(long, default_value = "info")]
     log: String,
+
+    /// True if audio/midi devices should automatically be connected.
+    #[arg(long, default_value = "true")]
+    autoconnect: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
-    let _client = init_jack()?;
+    let (_client, _notification_handler) = init_jack(args.autoconnect)?;
 
     std::thread::sleep(std::time::Duration::from_secs(10));
     tracing::info!("tinex finished");
