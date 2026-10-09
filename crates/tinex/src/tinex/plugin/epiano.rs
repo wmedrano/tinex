@@ -225,7 +225,7 @@ impl EPiano {
                     *fade = None;
                 }
             }
-            self.filter.push(sample);
+            self.filter.push(16.0 * sample);
         }
         self.filter.output() as f32
     }

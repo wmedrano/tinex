@@ -61,7 +61,7 @@ impl ProcessHandler {
 }
 
 impl jack::ProcessHandler for ProcessHandler {
-    fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
+    fn process(&mut self, client: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
         self.arena.reset();
         let input = self.audio_in.each_ref().map(|port| port.as_slice(ps));
         let output = self.audio_out.each_mut().map(|port| port.as_mut_slice(ps));
@@ -76,6 +76,7 @@ impl jack::ProcessHandler for ProcessHandler {
             }
         }
         let args = ProcessArgs {
+            sample_rate: client.sample_rate(),
             input,
             midi_input: messages.into_bump_slice(),
             output,
