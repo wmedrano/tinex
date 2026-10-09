@@ -1,0 +1,8 @@
+[package]
+name = "tinex-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bumpalo = { version = "3.20.3", features = ["collections"] }
+wmidi = "4.0.11"

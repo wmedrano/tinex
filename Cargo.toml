@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tinex"]
+members = ["crates/tinex", "crates/tinex-core", "crates/tinex-plugins", "crates/tinex-widgets"]
 resolver = "2"
 
 [profile.profiling]

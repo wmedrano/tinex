@@ -1,7 +1,3 @@
-mod epiano;
-
-pub use epiano::EPiano;
-
 use wmidi::MidiMessage;
 
 pub trait Plugin: 'static + Send {

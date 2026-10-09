@@ -5,8 +5,8 @@ use tracing::info;
 mod gui;
 mod jack;
 use jack::init_jack;
-use tinex::tinex;
-use tinex::{TinexRequest, plugin::EPiano, track::Track};
+use tinex_core::{TinexRequest, track::Track};
+use tinex_plugins::EPiano;
 
 /// tinex CLI
 #[derive(Parser, Debug)]

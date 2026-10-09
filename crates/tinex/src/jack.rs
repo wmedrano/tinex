@@ -3,7 +3,7 @@ use jack::PortSpec;
 use std::sync::{Arc, mpsc};
 use tracing::{error, info, warn};
 
-use crate::tinex::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
+use tinex_core::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
 
 /// The returned port handles are valid while the JACK client remains active.
 pub struct TinexHandle {

@@ -1,0 +1,9 @@
+[package]
+name = "tinex-plugins"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tinex-core = { path = "../tinex-core" }
+nalgebra = "0.33"
+wmidi = "4.0.11"

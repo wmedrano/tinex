@@ -1,0 +1,8 @@
+[package]
+name = "tinex-widgets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vello = "0.10"
+parley = "0.11.1"

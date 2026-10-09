@@ -2,9 +2,9 @@
 mod mechanics;
 mod pickup;
 
-use super::Plugin;
 use mechanics::{Assembly, NoteModel};
 use pickup::Pickup;
+use tinex_core::plugin::Plugin;
 use wmidi::{MidiMessage, Note};
 
 const VOICES: usize = 32;
@@ -225,7 +225,7 @@ impl EPiano {
                     *fade = None;
                 }
             }
-            self.filter.push(16.0 * sample);
+            self.filter.push(sample);
         }
         self.filter.output() as f32
     }

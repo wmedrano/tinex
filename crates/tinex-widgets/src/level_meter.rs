@@ -9,10 +9,10 @@ const MAX_DB: f64 = 6.0;
 const ZERO_DB_FRACTION: f64 = -MIN_DB / (MAX_DB - MIN_DB);
 
 /// A stateless level display. Callers own measurements, layout, and update timing.
-pub(super) struct LevelMeter;
+pub struct LevelMeter(pub f32);
 
 impl LevelMeter {
-    pub(super) fn draw(scene: &mut Scene, theme: &Theme, bounds: Rect, scale: f64, level: f32) {
+    pub fn draw(&self, scene: &mut Scene, theme: &Theme, bounds: Rect, scale: f64) {
         if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
             return;
         }
@@ -23,7 +23,7 @@ impl LevelMeter {
             None,
             &bounds,
         );
-        let [normal, over] = level_meter_segments(bounds, level);
+        let [normal, over] = level_meter_segments(bounds, self.0);
         for (fill, color) in [(normal, theme.meter_normal), (over, theme.meter_over)] {
             if fill.width() > 0.0 {
                 scene.fill(Fill::NonZero, Affine::scale(scale), color, None, &fill);

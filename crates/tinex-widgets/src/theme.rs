@@ -1,19 +1,20 @@
 use vello::peniko::Color;
 
 /// Colors shared by all GUI rendering.
-pub(super) struct Theme {
-    pub(super) background: Color,
-    pub(super) surface: Color,
-    pub(super) foreground: Color,
-    pub(super) button_background: Color,
-    pub(super) meter_normal: Color,
-    pub(super) meter_over: Color,
-    pub(super) meter_reference: Color,
-    pub(super) selected_background: Color,
-    pub(super) create_button_hovered: Color,
-    pub(super) create_button_pressed: Color,
-    pub(super) remove_button_hovered: Color,
-    pub(super) remove_button_pressed: Color,
+pub struct Theme {
+    pub background: Color,
+    pub surface: Color,
+    pub foreground: Color,
+    pub button_background: Color,
+    pub meter_normal: Color,
+    pub meter_over: Color,
+    pub meter_reference: Color,
+    pub selected_background: Color,
+    pub create_button_hovered: Color,
+    pub create_button_pressed: Color,
+    pub remove_icon: Color,
+    pub remove_button_hovered: Color,
+    pub remove_button_pressed: Color,
 }
 
 impl Default for Theme {
@@ -29,6 +30,7 @@ impl Default for Theme {
             selected_background: Color::from_rgb8(48, 75, 100),
             create_button_hovered: Color::from_rgb8(62, 164, 106),
             create_button_pressed: Color::from_rgb8(42, 126, 80),
+            remove_icon: Color::from_rgb8(255, 120, 120),
             remove_button_hovered: Color::from_rgb8(170, 70, 70),
             remove_button_pressed: Color::from_rgb8(140, 56, 56),
         }

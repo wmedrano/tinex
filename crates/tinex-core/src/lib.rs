@@ -1,3 +1,4 @@
+//! Tinex audio processing engine and plugin interfaces.
 use std::{
     collections::HashMap,
     sync::mpsc::{Receiver, Sender},
@@ -5,7 +6,7 @@ use std::{
 
 use wmidi::MidiMessage;
 
-use crate::tinex::{
+use crate::{
     id::Id,
     track::{Track, TrackId},
 };

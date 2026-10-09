@@ -5,17 +5,23 @@ use vello::Scene;
 use vello::kurbo::{Affine, Point};
 use vello::peniko::{Color, Fill};
 
-pub(super) struct TextRenderer {
+pub struct TextRenderer {
     fonts: FontContext,
     context: LayoutContext<()>,
 }
 
 impl TextRenderer {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         let mut fonts = FontContext::new();
         fonts.collection.register_fonts(
             vello::peniko::Blob::new(Arc::new(
-                include_bytes!("../../../../resources/notosans/NotoSans.ttf").to_vec(),
+                include_bytes!("../../../resources/notosans/NotoSans.ttf").to_vec(),
+            )),
+            None,
+        );
+        fonts.collection.register_fonts(
+            vello::peniko::Blob::new(Arc::new(
+                include_bytes!("../../../resources/openmoji/OpenMoji.ttf").to_vec(),
             )),
             None,
         );
@@ -25,18 +31,11 @@ impl TextRenderer {
         }
     }
 
-    pub(super) fn draw(
-        &mut self,
-        scene: &mut Scene,
-        text: &str,
-        origin: Point,
-        scale: f64,
-        color: Color,
-    ) {
+    pub fn draw(&mut self, scene: &mut Scene, text: &str, origin: Point, scale: f64, color: Color) {
         self.draw_aligned(scene, text, origin, scale, color, false);
     }
 
-    pub(super) fn draw_right(
+    pub fn draw_right(
         &mut self,
         scene: &mut Scene,
         text: &str,
@@ -59,7 +58,7 @@ impl TextRenderer {
         let mut builder = self
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily("Noto Sans".into()));
+        builder.push_default(StyleProperty::FontFamily("Noto Sans, OpenMoji".into()));
         builder.push_default(StyleProperty::FontSize(16.0));
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
@@ -94,7 +93,55 @@ impl TextRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::theme::Theme;
+    use crate::Theme;
+
+    #[test]
+    fn emoji_sequences_use_bundled_openmoji() {
+        let mut renderer = TextRenderer::new();
+        for text in ["😀", "👍🏽", "🇺🇸", "❤️", "👩‍💻", "🎛️", "⚙️", "🖥️"]
+        {
+            let mut builder =
+                renderer
+                    .context
+                    .ranged_builder(&mut renderer.fonts, text, 1.0, false);
+            builder.push_default(StyleProperty::FontFamily("Noto Sans, OpenMoji".into()));
+            let mut layout: Layout<()> = builder.build(text);
+            layout.break_all_lines(None);
+            let mut glyph_count = 0;
+            for line in layout.lines() {
+                for item in line.items() {
+                    let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                        continue;
+                    };
+                    assert_eq!(
+                        glyph_run.run().font().data.as_ref(),
+                        include_bytes!("../../../resources/openmoji/OpenMoji.ttf").as_slice(),
+                        "wrong font for {text}",
+                    );
+                    for glyph in glyph_run.positioned_glyphs() {
+                        assert_ne!(glyph.id, 0, "missing glyph for {text}");
+                        // Shaping may retain an invisible variation selector with zero advance.
+                        if glyph.advance > 0.0 {
+                            glyph_count += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                glyph_count, 1,
+                "sequence should shape into one emoji: {text}"
+            );
+            let mut scene = Scene::new();
+            renderer.draw(
+                &mut scene,
+                text,
+                Point::ZERO,
+                2.0,
+                Theme::default().foreground,
+            );
+            assert!(!scene.encoding().is_empty(), "empty scene for {text}");
+        }
+    }
 
     #[test]
     fn bundled_font_can_render_gui_labels() {
@@ -102,7 +149,7 @@ mod tests {
         let mut scene = Scene::new();
         renderer.draw(
             &mut scene,
-            "Tracks Settings CPU load: 12.3%",
+            "Tracks Settings 🖥️ CPU 12.3%",
             Point::ZERO,
             2.0,
             Theme::default().foreground,

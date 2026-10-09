@@ -2484,14 +2484,40 @@ dependencies = [
  "bumpalo",
  "clap",
  "jack",
- "nalgebra",
- "parley",
  "pollster",
+ "tinex-core",
+ "tinex-plugins",
+ "tinex-widgets",
  "tracing",
  "tracing-subscriber",
  "vello",
  "winit",
  "wmidi",
+]
+
+[[package]]
+name = "tinex-core"
+version = "0.1.0"
+dependencies = [
+ "bumpalo",
+ "wmidi",
+]
+
+[[package]]
+name = "tinex-plugins"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "tinex-core",
+ "wmidi",
+]
+
+[[package]]
+name = "tinex-widgets"
+version = "0.1.0"
+dependencies = [
+ "parley",
+ "vello",
 ]
 
 [[package]]

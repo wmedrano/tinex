@@ -1,14 +1,9 @@
 mod graphics;
-mod level_meter;
 mod sidebar;
-mod text;
-mod theme;
 
 use graphics::Graphics;
-use level_meter::LevelMeter;
-use sidebar::{Page, SIDEBAR_WIDTH, Sidebar};
-use text::TextRenderer;
-use theme::Theme;
+use sidebar::{Control, Page, Sidebar};
+use tinex_widgets::{LevelMeter, TextRenderer, Theme};
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -17,7 +12,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect};
+use vello::kurbo::{Affine, Line, Point, Rect, Stroke};
 use vello::peniko::{BlendMode, Fill};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -26,9 +21,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::jack::TinexHandle;
-use crate::tinex::id::Id;
-use crate::tinex::track::Track;
-use crate::tinex::{TinexNotification, TinexRequest};
+use tinex_core::id::Id;
+use tinex_core::track::Track;
+use tinex_core::{TinexNotification, TinexRequest};
 
 pub fn run(handle: TinexHandle) -> Result<()> {
     let event_loop = EventLoop::new().context("Could not create GUI event loop")?;
@@ -135,6 +130,10 @@ impl App {
             &Rect::new(0.0, 0.0, size.width, size.height),
         );
         self.draw_content(size, scale);
+        self.draw_create_tooltip(scale);
+        self.draw_remove_tooltip(size, scale);
+        self.sidebar
+            .draw_tooltip(&mut self.scene, &mut self.text, &self.theme, size, scale);
         self.scene.pop_layer();
     }
 
@@ -151,13 +150,13 @@ impl App {
             self.text.draw(
                 &mut self.scene,
                 "Settings",
-                Point::new(SIDEBAR_WIDTH + 32.0, 32.0),
+                Point::new(self.sidebar.width() + 32.0, 32.0),
                 scale,
                 self.theme.foreground,
             );
             return;
         }
-        let button_color = if self.create_track_button.hovered() {
+        let button_color = if self.create_track_button.hovered(self.sidebar.width()) {
             if self.create_track_button.pressed {
                 self.theme.create_button_pressed
             } else {
@@ -171,12 +170,22 @@ impl App {
             Affine::scale(scale),
             button_color,
             None,
-            &CreateTrackButton::DIMENSIONS.to_rounded_rect(6.0),
+            &CreateTrackButton::rect(self.sidebar.width()).to_rounded_rect(6.0),
         );
         // A plus sign is the initial create-track affordance.
         for bar in [
-            Rect::new(SIDEBAR_WIDTH + 46.0, 50.5, SIDEBAR_WIDTH + 66.0, 53.5),
-            Rect::new(SIDEBAR_WIDTH + 54.5, 42.0, SIDEBAR_WIDTH + 57.5, 62.0),
+            Rect::new(
+                self.sidebar.width() + 46.0,
+                50.5,
+                self.sidebar.width() + 66.0,
+                53.5,
+            ),
+            Rect::new(
+                self.sidebar.width() + 54.5,
+                42.0,
+                self.sidebar.width() + 57.5,
+                62.0,
+            ),
         ] {
             self.scene.fill(
                 Fill::NonZero,
@@ -186,7 +195,7 @@ impl App {
                 &bar,
             );
         }
-        for (track, row) in self.tracks.rows(size) {
+        for (track, row) in self.tracks.rows(size, self.sidebar.width()) {
             self.scene.fill(
                 Fill::NonZero,
                 Affine::scale(scale),
@@ -201,15 +210,14 @@ impl App {
                 scale,
                 self.theme.foreground,
             );
-            LevelMeter::draw(
+            LevelMeter(track.output_level).draw(
                 &mut self.scene,
                 &self.theme,
                 level_meter_rect(row),
                 scale,
-                track.output_level,
             );
             let button = remove_button_rect(row);
-            let hovered = self.tracks.hovered(size) == Some(track.id);
+            let hovered = self.tracks.hovered(size, self.sidebar.width()) == Some(track.id);
             let color = if hovered && self.tracks.pressed == Some(track.id) {
                 self.theme.remove_button_pressed
             } else if hovered {
@@ -224,12 +232,83 @@ impl App {
                 None,
                 &button.to_rounded_rect(4.0),
             );
-            self.text.draw(
-                &mut self.scene,
-                "Remove",
-                Point::new(button.x0 + 8.0, button.y0 + 6.0),
-                scale,
-                self.theme.foreground,
+            draw_trash_icon(&mut self.scene, button, &self.theme, scale);
+        }
+    }
+
+    fn draw_create_tooltip(&mut self, scale: f64) {
+        if self.page != Page::Tracks || !self.create_track_button.hovered(self.sidebar.width()) {
+            return;
+        }
+        let button = CreateTrackButton::rect(self.sidebar.width());
+        let x = button.x0;
+        let y = button.y1 + 4.0;
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::scale(scale),
+            self.theme.button_background,
+            None,
+            &Rect::new(x, y, x + 120.0, y + 36.0).to_rounded_rect(6.0),
+        );
+        self.text.draw(
+            &mut self.scene,
+            "Create track",
+            Point::new(x + 8.0, y + 6.0),
+            scale,
+            self.theme.foreground,
+        );
+    }
+
+    fn draw_remove_tooltip(&mut self, size: LogicalSize<f64>, scale: f64) {
+        if self.page != Page::Tracks {
+            return;
+        }
+        let Some(id) = self.tracks.hovered(size, self.sidebar.width()) else {
+            return;
+        };
+        let Some((_, row)) = self
+            .tracks
+            .rows(size, self.sidebar.width())
+            .find(|(track, _)| track.id == id)
+        else {
+            return;
+        };
+        let button = remove_button_rect(row);
+        let x = (button.x1 - 120.0).max(0.0);
+        let y = (button.y0 - 40.0).max(0.0);
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::scale(scale),
+            self.theme.button_background,
+            None,
+            &Rect::new(x, y, x + 120.0, y + 36.0).to_rounded_rect(6.0),
+        );
+        self.text.draw(
+            &mut self.scene,
+            "Remove track",
+            Point::new(x + 8.0, y + 6.0),
+            scale,
+            self.theme.foreground,
+        );
+    }
+
+    fn refresh_content_cursor(&mut self) {
+        let cursor = (self.page == Page::Tracks)
+            .then(|| self.sidebar.cursor())
+            .flatten();
+        self.create_track_button.cursor = cursor;
+        self.tracks.cursor = cursor;
+        if let Some(window) = &self.window {
+            let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+            window.set_cursor(
+                if self.sidebar.hovered().is_some()
+                    || self.create_track_button.hovered(self.sidebar.width())
+                    || self.tracks.hovered(size, self.sidebar.width()).is_some()
+                {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                },
             );
         }
     }
@@ -252,8 +331,8 @@ impl App {
             &bar,
         );
         let load = self.cpu_load.map_or_else(
-            || "CPU load: --".to_string(),
-            |load| format!("CPU load: {load:.1}%"),
+            || "🖥️ CPU --".to_string(),
+            |load| format!("🖥️ CPU {load:.1}%"),
         );
         self.text.draw_right(
             &mut self.scene,
@@ -270,13 +349,7 @@ impl App {
                 scale,
                 self.theme.foreground,
             );
-            LevelMeter::draw(
-                &mut self.scene,
-                &self.theme,
-                meter,
-                scale,
-                self.meters.output_level,
-            );
+            LevelMeter(self.meters.output_level).draw(&mut self.scene, &self.theme, meter, scale);
         }
         self.scene.pop_layer();
     }
@@ -313,7 +386,7 @@ impl ApplicationHandler for App {
         self.active = false;
         self.graphics.suspend();
         self.create_track_button = CreateTrackButton::default();
-        self.sidebar = Sidebar::default();
+        self.sidebar.reset_input();
         self.tracks.reset_input();
     }
 
@@ -341,34 +414,14 @@ impl ApplicationHandler for App {
                 {
                     self.sidebar.set_cursor(Point::new(position.x, position.y));
                 } else {
-                    self.sidebar = Sidebar::default();
+                    self.sidebar.reset_input();
                 }
-                self.create_track_button.cursor = (self.page == Page::Tracks
-                    && position.y
-                        < content_size(window.inner_size().to_logical(window.scale_factor()))
-                            .height)
-                    .then_some(Point::new(position.x, position.y));
-                self.tracks.cursor = self.create_track_button.cursor;
-                window.set_cursor(
-                    if self.create_track_button.hovered()
-                        || self.sidebar.hovered().is_some()
-                        || self
-                            .tracks
-                            .hovered(content_size(
-                                window.inner_size().to_logical(window.scale_factor()),
-                            ))
-                            .is_some()
-                    {
-                        CursorIcon::Pointer
-                    } else {
-                        CursorIcon::Default
-                    },
-                );
-                window.request_redraw();
+                self.refresh_content_cursor();
+                self.window.as_ref().unwrap().request_redraw();
                 Ok(())
             }
             WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
-                self.sidebar = Sidebar::default();
+                self.sidebar.reset_input();
                 self.tracks.reset_input();
                 self.create_track_button = CreateTrackButton::default();
                 let window = self.window.as_ref().unwrap();
@@ -381,15 +434,22 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(page) = self.sidebar.mouse_input(state) {
-                    self.page = page;
+                if let Some(control) = self.sidebar.mouse_input(state) {
+                    if let Control::Page(page) = control {
+                        self.page = page;
+                    }
                     self.tracks.reset_input();
                     self.create_track_button = CreateTrackButton::default();
+                    self.refresh_content_cursor();
+                    self.window.as_ref().unwrap().request_redraw();
+                    return;
                 }
                 if self.page == Page::Tracks
-                    && self.create_track_button.mouse_input(state)
+                    && self
+                        .create_track_button
+                        .mouse_input(state, self.sidebar.width())
                     && let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(
-                        Track::new(crate::tinex::plugin::EPiano::new(
+                        Track::new(tinex_plugins::EPiano::new(
                             self.handle.client.as_client().sample_rate() as f32,
                         )),
                     ))
@@ -399,7 +459,7 @@ impl ApplicationHandler for App {
                 if self.page == Page::Tracks {
                     let window = self.window.as_ref().unwrap();
                     let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                    if let Some(id) = self.tracks.mouse_input(state, size)
+                    if let Some(id) = self.tracks.mouse_input(state, size, self.sidebar.width())
                         && let Err(error) = self.handle.requests.send(TinexRequest::DeleteTrack(id))
                     {
                         warn!(?error, "Could not request track deletion");
@@ -419,6 +479,7 @@ impl ApplicationHandler for App {
                 self.tracks.scroll(
                     rows,
                     content_size(window.inner_size().to_logical(window.scale_factor())),
+                    self.sidebar.width(),
                 );
                 window.request_redraw();
                 Ok(())
@@ -477,21 +538,23 @@ struct CreateTrackButton {
 }
 
 impl CreateTrackButton {
-    const DIMENSIONS: Rect = Rect::new(SIDEBAR_WIDTH + 32.0, 32.0, SIDEBAR_WIDTH + 80.0, 72.0);
-
-    fn hovered(&self) -> bool {
-        self.cursor
-            .is_some_and(|point| Self::DIMENSIONS.contains(point))
+    fn rect(sidebar_width: f64) -> Rect {
+        Rect::new(sidebar_width + 32.0, 32.0, sidebar_width + 80.0, 72.0)
     }
 
-    fn mouse_input(&mut self, state: ElementState) -> bool {
+    fn hovered(&self, sidebar_width: f64) -> bool {
+        self.cursor
+            .is_some_and(|point| Self::rect(sidebar_width).contains(point))
+    }
+
+    fn mouse_input(&mut self, state: ElementState, sidebar_width: f64) -> bool {
         match state {
             ElementState::Pressed => {
-                self.pressed = self.hovered();
+                self.pressed = self.hovered(sidebar_width);
                 false
             }
             ElementState::Released => {
-                let clicked = self.pressed && self.hovered();
+                let clicked = self.pressed && self.hovered(sidebar_width);
                 self.pressed = false;
                 clicked
             }
@@ -535,7 +598,7 @@ fn next_update(cpu: Instant, levels: Option<Instant>) -> Instant {
 const LEVEL_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
 const TRACK_ROW_HEIGHT: f64 = 48.0;
 const TRACK_ROW_STRIDE: f64 = 56.0;
-const TRACK_LIST_TOP: f64 = CreateTrackButton::DIMENSIONS.y1 + 16.0;
+const TRACK_LIST_TOP: f64 = 88.0;
 
 #[derive(Default)]
 struct UiTracks {
@@ -627,34 +690,41 @@ impl UiTracks {
         }
     }
 
-    fn visible_count(size: LogicalSize<f64>) -> usize {
-        if size.width < SIDEBAR_WIDTH + 240.0 {
+    fn visible_count(size: LogicalSize<f64>, sidebar_width: f64) -> usize {
+        if size.width < sidebar_width + 240.0 {
             return 0;
         }
         ((size.height - 32.0 - TRACK_LIST_TOP + 8.0) / TRACK_ROW_STRIDE).max(0.0) as usize
     }
 
-    fn scroll_offset(&self, size: LogicalSize<f64>) -> f64 {
-        self.scroll_offset
-            .min(self.tracks.len().saturating_sub(Self::visible_count(size)) as f64)
+    fn scroll_offset(&self, size: LogicalSize<f64>, sidebar_width: f64) -> f64 {
+        self.scroll_offset.min(
+            self.tracks
+                .len()
+                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
+        )
     }
 
-    fn first_visible(&self, size: LogicalSize<f64>) -> usize {
-        self.scroll_offset(size).round() as usize
+    fn first_visible(&self, size: LogicalSize<f64>, sidebar_width: f64) -> usize {
+        self.scroll_offset(size, sidebar_width).round() as usize
     }
 
-    fn rows(&self, size: LogicalSize<f64>) -> impl Iterator<Item = (&UiTrack, Rect)> {
+    fn rows(
+        &self,
+        size: LogicalSize<f64>,
+        sidebar_width: f64,
+    ) -> impl Iterator<Item = (&UiTrack, Rect)> {
         self.tracks
             .iter()
-            .skip(self.first_visible(size))
-            .take(Self::visible_count(size))
+            .skip(self.first_visible(size, sidebar_width))
+            .take(Self::visible_count(size, sidebar_width))
             .enumerate()
             .map(move |(index, track)| {
                 let y = TRACK_LIST_TOP + index as f64 * TRACK_ROW_STRIDE;
                 (
                     track,
                     Rect::new(
-                        SIDEBAR_WIDTH + 32.0,
+                        sidebar_width + 32.0,
                         y,
                         size.width - 32.0,
                         y + TRACK_ROW_HEIGHT,
@@ -663,23 +733,28 @@ impl UiTracks {
             })
     }
 
-    fn hovered(&self, size: LogicalSize<f64>) -> Option<Id<Track>> {
+    fn hovered(&self, size: LogicalSize<f64>, sidebar_width: f64) -> Option<Id<Track>> {
         let cursor = self.cursor?;
-        self.rows(size)
+        self.rows(size, sidebar_width)
             .find(|(_, row)| remove_button_rect(*row).contains(cursor))
             .map(|(track, _)| track.id)
     }
 
-    fn mouse_input(&mut self, state: ElementState, size: LogicalSize<f64>) -> Option<Id<Track>> {
+    fn mouse_input(
+        &mut self,
+        state: ElementState,
+        size: LogicalSize<f64>,
+        sidebar_width: f64,
+    ) -> Option<Id<Track>> {
         match state {
             ElementState::Pressed => {
-                self.pressed = self.hovered(size);
+                self.pressed = self.hovered(size, sidebar_width);
                 None
             }
             ElementState::Released => self
                 .pressed
                 .take()
-                .filter(|id| Some(*id) == self.hovered(size)),
+                .filter(|id| Some(*id) == self.hovered(size, sidebar_width)),
         }
     }
 
@@ -688,12 +763,41 @@ impl UiTracks {
         self.pressed = None;
     }
 
-    fn scroll(&mut self, rows: f64, size: LogicalSize<f64>) {
-        self.scroll_offset = (self.scroll_offset(size) + rows).clamp(
+    fn scroll(&mut self, rows: f64, size: LogicalSize<f64>, sidebar_width: f64) {
+        self.scroll_offset = (self.scroll_offset(size, sidebar_width) + rows).clamp(
             0.0,
-            self.tracks.len().saturating_sub(Self::visible_count(size)) as f64,
+            self.tracks
+                .len()
+                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
         );
         self.pressed = None;
+    }
+}
+
+fn draw_trash_icon(scene: &mut Scene, button: Rect, theme: &Theme, scale: f64) {
+    let center = button.center();
+    let transform = Affine::scale(scale) * Affine::translate((center.x, center.y));
+    let stroke = Stroke::new(1.8);
+    scene.stroke(
+        &stroke,
+        transform,
+        theme.remove_icon,
+        None,
+        &Rect::new(-7.0, -5.0, 7.0, 10.0).to_rounded_rect(2.0),
+    );
+    scene.stroke(
+        &stroke,
+        transform,
+        theme.remove_icon,
+        None,
+        &Rect::new(-3.0, -10.0, 3.0, -7.0).to_rounded_rect(1.0),
+    );
+    for line in [
+        Line::new((-10.0, -7.0), (10.0, -7.0)),
+        Line::new((-2.5, -2.0), (-2.5, 6.0)),
+        Line::new((2.5, -2.0), (2.5, 6.0)),
+    ] {
+        scene.stroke(&stroke, transform, theme.remove_icon, None, &line);
     }
 }
 
@@ -711,9 +815,63 @@ mod gui_tests {
     use std::sync::mpsc;
 
     #[test]
+    fn content_geometry_and_hits_follow_sidebar_width() {
+        let mut tracks = UiTracks::default();
+        for _ in 0..64 {
+            tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
+        }
+        for size in [
+            LogicalSize::new(400.0, 200.0),
+            LogicalSize::new(800.0, 450.0),
+        ] {
+            let size = content_size(size);
+            tracks.scroll(3.0, size, 160.0);
+            let offset = tracks.scroll_offset;
+            let first = tracks.rows(size, 160.0).next().map(|(track, _)| track.id);
+            for width in [64.0, 160.0] {
+                assert_eq!(
+                    tracks.rows(size, width).next().map(|(track, _)| track.id),
+                    first
+                );
+                let create = CreateTrackButton::rect(width);
+                assert_eq!(create.x0, width + 32.0);
+                assert!(create.x1 <= size.width);
+                let mut button = CreateTrackButton {
+                    cursor: Some(create.center()),
+                    pressed: false,
+                };
+                button.mouse_input(ElementState::Pressed, width);
+                assert!(button.mouse_input(ElementState::Released, width));
+                let Some((id, row)) = tracks
+                    .rows(size, width)
+                    .next()
+                    .map(|(track, row)| (track.id, row))
+                else {
+                    assert_eq!(UiTracks::visible_count(size, width), 0);
+                    continue;
+                };
+                assert_eq!(row.x0, width + 32.0);
+                assert!(row.y1 <= size.height);
+                assert!(level_meter_rect(row).width() > 0.0);
+                tracks.cursor = Some(remove_button_rect(row).center());
+                tracks.mouse_input(ElementState::Pressed, size, width);
+                assert_eq!(
+                    tracks.mouse_input(ElementState::Released, size, width),
+                    Some(id)
+                );
+                tracks.reset_input();
+                assert_eq!(tracks.scroll_offset, offset);
+            }
+        }
+        let narrow = LogicalSize::new(350.0, 200.0);
+        assert_eq!(UiTracks::visible_count(narrow, 160.0), 0);
+        assert!(UiTracks::visible_count(narrow, 64.0) > 0);
+    }
+
+    #[test]
     fn levels_follow_track_ids_and_ignore_deleted_tracks() {
         let mut tracks = UiTracks::default();
-        let first = Track::new(crate::tinex::plugin::Silence);
+        let first = Track::new(tinex_core::plugin::Silence);
         let second_id = Id::new();
         tracks.on_notification(TinexNotification::TrackCreated(first.id()));
         tracks.on_notification(TinexNotification::TrackCreated(second_id));
@@ -742,7 +900,7 @@ mod gui_tests {
         let (sender, receiver) = mpsc::channel();
         let mut tracks = UiTracks::default();
         let mut meters = UiMeters::default();
-        let first = Track::new(crate::tinex::plugin::Silence);
+        let first = Track::new(tinex_core::plugin::Silence);
         let second_id = Id::new();
         tracks.on_notification(TinexNotification::TrackCreated(first.id()));
         tracks.on_notification(TinexNotification::TrackCreated(second_id));
@@ -841,14 +999,14 @@ mod gui_tests {
             for _ in 0..64 {
                 tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
             }
-            tracks.scroll(100.0, content);
+            tracks.scroll(100.0, content, 160.0);
             assert!(
                 tracks
-                    .rows(content)
+                    .rows(content, 160.0)
                     .all(|(_, row)| row.y1 <= content.height)
             );
             tracks.cursor = Some(Point::new(size.width - 50.0, content.height + 20.0));
-            assert!(tracks.hovered(content).is_none());
+            assert!(tracks.hovered(content, 160.0).is_none());
         }
         assert!(bottom_meter_rect(LogicalSize::new(200.0, 200.0)).is_none());
         assert_eq!(content_size(LogicalSize::new(20.0, 20.0)).height, 0.0);
@@ -864,8 +1022,8 @@ mod gui_tests {
             LogicalSize::new(400.0, 200.0),
             LogicalSize::new(800.0, 450.0),
         ] {
-            tracks.scroll(100.0, size);
-            for (_, row) in tracks.rows(size) {
+            tracks.scroll(100.0, size, 160.0);
+            for (_, row) in tracks.rows(size, 160.0) {
                 let meter = level_meter_rect(row);
                 assert!(meter.width() > 0.0);
                 assert!(row.contains(meter.origin()));
@@ -878,27 +1036,27 @@ mod gui_tests {
     #[test]
     fn create_track_requires_a_complete_click_inside_button() {
         let mut button = CreateTrackButton {
-            cursor: Some(Point::new(SIDEBAR_WIDTH + 56.0, 52.0)),
+            cursor: Some(Point::new(160.0 + 56.0, 52.0)),
             ..Default::default()
         };
-        assert!(!button.mouse_input(ElementState::Released));
-        assert!(!button.mouse_input(ElementState::Pressed));
-        assert!(button.mouse_input(ElementState::Released));
-        assert!(!button.mouse_input(ElementState::Released));
+        assert!(!button.mouse_input(ElementState::Released, 160.0));
+        assert!(!button.mouse_input(ElementState::Pressed, 160.0));
+        assert!(button.mouse_input(ElementState::Released, 160.0));
+        assert!(!button.mouse_input(ElementState::Released, 160.0));
 
-        button.mouse_input(ElementState::Pressed);
+        button.mouse_input(ElementState::Pressed, 160.0);
         button.cursor = Some(Point::new(100.0, 100.0));
-        assert!(!button.mouse_input(ElementState::Released));
-        button.mouse_input(ElementState::Pressed);
-        button.cursor = Some(Point::new(SIDEBAR_WIDTH + 56.0, 52.0));
-        assert!(!button.mouse_input(ElementState::Released));
+        assert!(!button.mouse_input(ElementState::Released, 160.0));
+        button.mouse_input(ElementState::Pressed, 160.0);
+        button.cursor = Some(Point::new(160.0 + 56.0, 52.0));
+        assert!(!button.mouse_input(ElementState::Released, 160.0));
     }
 
     #[test]
     fn track_metadata_follows_confirmed_lifecycle() {
         let mut tracks = UiTracks::default();
-        let first = Track::new(crate::tinex::plugin::Silence);
-        let second = Track::new(crate::tinex::plugin::Silence);
+        let first = Track::new(tinex_core::plugin::Silence);
+        let second = Track::new(tinex_core::plugin::Silence);
         let first_id = first.id();
         let second_id = second.id();
         for notification in [
@@ -908,7 +1066,7 @@ mod gui_tests {
                 tracks: Default::default(),
             },
             TinexNotification::TrackCreated(second_id),
-            TinexNotification::TrackCreationFailed(Track::new(crate::tinex::plugin::Silence)),
+            TinexNotification::TrackCreationFailed(Track::new(tinex_core::plugin::Silence)),
         ] {
             tracks.on_notification(notification);
         }
@@ -920,7 +1078,7 @@ mod gui_tests {
         assert_eq!(tracks.tracks[0].id, second_id);
         assert_eq!(tracks.tracks[0].name, "track-2");
         for notification in [
-            TinexNotification::TrackDeleted(Track::new(crate::tinex::plugin::Silence)),
+            TinexNotification::TrackDeleted(Track::new(tinex_core::plugin::Silence)),
             TinexNotification::TrackCreated(Id::new()),
         ] {
             tracks.on_notification(notification);
@@ -932,8 +1090,8 @@ mod gui_tests {
     #[test]
     fn remove_click_targets_id_even_when_rows_shift() {
         let size = LogicalSize::new(800.0, 450.0);
-        let first = Track::new(crate::tinex::plugin::Silence);
-        let second = Track::new(crate::tinex::plugin::Silence);
+        let first = Track::new(tinex_core::plugin::Silence);
+        let second = Track::new(tinex_core::plugin::Silence);
         let mut tracks = UiTracks::default();
         for notification in [
             TinexNotification::TrackCreated(first.id()),
@@ -941,17 +1099,23 @@ mod gui_tests {
         ] {
             tracks.on_notification(notification);
         }
-        let button = remove_button_rect(tracks.rows(size).nth(1).unwrap().1);
+        let button = remove_button_rect(tracks.rows(size, 160.0).nth(1).unwrap().1);
         tracks.cursor = Some(button.center());
-        assert_eq!(tracks.mouse_input(ElementState::Released, size), None);
-        tracks.mouse_input(ElementState::Pressed, size);
-        tracks.on_notification(TinexNotification::TrackDeleted(first));
-        assert_eq!(tracks.mouse_input(ElementState::Released, size), None);
-        let button = remove_button_rect(tracks.rows(size).next().unwrap().1);
-        tracks.cursor = Some(button.center());
-        tracks.mouse_input(ElementState::Pressed, size);
         assert_eq!(
-            tracks.mouse_input(ElementState::Released, size),
+            tracks.mouse_input(ElementState::Released, size, 160.0),
+            None
+        );
+        tracks.mouse_input(ElementState::Pressed, size, 160.0);
+        tracks.on_notification(TinexNotification::TrackDeleted(first));
+        assert_eq!(
+            tracks.mouse_input(ElementState::Released, size, 160.0),
+            None
+        );
+        let button = remove_button_rect(tracks.rows(size, 160.0).next().unwrap().1);
+        tracks.cursor = Some(button.center());
+        tracks.mouse_input(ElementState::Pressed, size, 160.0);
+        assert_eq!(
+            tracks.mouse_input(ElementState::Released, size, 160.0),
             Some(second.id())
         );
     }
@@ -967,9 +1131,9 @@ mod gui_tests {
             LogicalSize::new(800.0, 450.0),
         ] {
             tracks.scroll_offset = 0.0;
-            assert_eq!(tracks.rows(size).next().unwrap().0.name, "track-1");
-            tracks.scroll(100.0, size);
-            let rows: Vec<_> = tracks.rows(size).collect();
+            assert_eq!(tracks.rows(size, 160.0).next().unwrap().0.name, "track-1");
+            tracks.scroll(100.0, size, 160.0);
+            let rows: Vec<_> = tracks.rows(size, 160.0).collect();
             assert_eq!(rows.last().unwrap().0.name, "track-64");
             for (_, row) in rows {
                 assert!(row.y1 <= size.height - 32.0);
