@@ -3,7 +3,7 @@ mod sidebar;
 
 use graphics::Graphics;
 use sidebar::{Control, Page, Sidebar};
-use tinex_widgets::{LevelMeter, TextRenderer, Theme};
+use tinex_widgets::{LevelMeter, TextRenderer, Theme, Tooltip};
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -243,19 +243,12 @@ impl App {
         let button = CreateTrackButton::rect(self.sidebar.width());
         let x = button.x0;
         let y = button.y1 + 4.0;
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            self.theme.button_background,
-            None,
-            &Rect::new(x, y, x + 120.0, y + 36.0).to_rounded_rect(6.0),
-        );
-        self.text.draw(
+        Tooltip("Create track").draw(
             &mut self.scene,
-            "Create track",
-            Point::new(x + 8.0, y + 6.0),
+            &mut self.text,
+            &self.theme,
+            Rect::new(x, y, x + 120.0, y + 36.0),
             scale,
-            self.theme.foreground,
         );
     }
 
@@ -276,19 +269,12 @@ impl App {
         let button = remove_button_rect(row);
         let x = (button.x1 - 120.0).max(0.0);
         let y = (button.y0 - 40.0).max(0.0);
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            self.theme.button_background,
-            None,
-            &Rect::new(x, y, x + 120.0, y + 36.0).to_rounded_rect(6.0),
-        );
-        self.text.draw(
+        Tooltip("Remove track").draw(
             &mut self.scene,
-            "Remove track",
-            Point::new(x + 8.0, y + 6.0),
+            &mut self.text,
+            &self.theme,
+            Rect::new(x, y, x + 120.0, y + 36.0),
             scale,
-            self.theme.foreground,
         );
     }
 

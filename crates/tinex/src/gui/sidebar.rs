@@ -4,7 +4,7 @@ use vello::peniko::Fill;
 use winit::dpi::LogicalSize;
 use winit::event::ElementState;
 
-use tinex_widgets::{TextRenderer, Theme};
+use tinex_widgets::{TextRenderer, Theme, Tooltip};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Page {
@@ -172,19 +172,12 @@ impl Sidebar {
         };
         let x = (self.width() + 8.0).min((size.width - width).max(0.0));
         let y = control.y0.min((size.height - 36.0).max(0.0));
-        scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            theme.button_background,
-            None,
-            &Rect::new(x, y, x + width, y + 36.0).to_rounded_rect(6.0),
-        );
-        text.draw(
+        Tooltip(label).draw(
             scene,
-            label,
-            Point::new(x + 8.0, y + 6.0),
+            text,
+            theme,
+            Rect::new(x, y, x + width, y + 36.0),
             scale,
-            theme.foreground,
         );
     }
 
