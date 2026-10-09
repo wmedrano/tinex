@@ -21,7 +21,7 @@ impl TextRenderer {
         );
         fonts.collection.register_fonts(
             vello::peniko::Blob::new(Arc::new(
-                include_bytes!("../../../resources/openmoji/OpenMoji.ttf").to_vec(),
+                include_bytes!("../../../resources/noto-color-emoji/NotoColorEmoji.ttf").to_vec(),
             )),
             None,
         );
@@ -58,7 +58,9 @@ impl TextRenderer {
         let mut builder = self
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily("Noto Sans, OpenMoji".into()));
+        builder.push_default(StyleProperty::FontFamily(
+            "Noto Sans, Noto Color Emoji".into(),
+        ));
         builder.push_default(StyleProperty::FontSize(16.0));
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
@@ -96,15 +98,17 @@ mod tests {
     use crate::Theme;
 
     #[test]
-    fn emoji_sequences_use_bundled_openmoji() {
+    fn emoji_sequences_use_bundled_noto_color_emoji() {
         let mut renderer = TextRenderer::new();
-        for text in ["😀", "👍🏽", "🇺🇸", "❤️", "👩‍💻", "🎛️", "⚙️", "🖥️"]
+        for text in ["😀", "👍🏽", "🇺🇸", "❤️", "👩‍💻", "🎛️", "⚙️", "🖥️", "🔌", "🎹"]
         {
             let mut builder =
                 renderer
                     .context
                     .ranged_builder(&mut renderer.fonts, text, 1.0, false);
-            builder.push_default(StyleProperty::FontFamily("Noto Sans, OpenMoji".into()));
+            builder.push_default(StyleProperty::FontFamily(
+                "Noto Sans, Noto Color Emoji".into(),
+            ));
             let mut layout: Layout<()> = builder.build(text);
             layout.break_all_lines(None);
             let mut glyph_count = 0;
@@ -115,7 +119,8 @@ mod tests {
                     };
                     assert_eq!(
                         glyph_run.run().font().data.as_ref(),
-                        include_bytes!("../../../resources/openmoji/OpenMoji.ttf").as_slice(),
+                        include_bytes!("../../../resources/noto-color-emoji/NotoColorEmoji.ttf")
+                            .as_slice(),
                         "wrong font for {text}",
                     );
                     for glyph in glyph_run.positioned_glyphs() {

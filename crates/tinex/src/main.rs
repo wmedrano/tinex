@@ -6,7 +6,6 @@ mod gui;
 mod jack;
 use jack::init_jack;
 use tinex_core::{TinexRequest, track::Track};
-use tinex_plugins::EPiano;
 
 /// tinex CLI
 #[derive(Parser, Debug)]
@@ -25,11 +24,19 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
     let handle = init_jack(args.autoconnect)?;
+    let mut track = Track::new();
+    track.push_plugin(tinex_plugins::EPiano::new(
+        handle.client.as_client().sample_rate() as f32,
+    ));
+    track.push_plugin(tinex_plugins::Tremolo::new(
+        handle.client.as_client().sample_rate() as f32,
+    ));
+    track.push_plugin(tinex_plugins::Delay::new(
+        handle.client.as_client().sample_rate() as f32,
+    ));
     handle
         .requests
-        .send(TinexRequest::NewTrack(Track::new(EPiano::new(
-            handle.client.as_client().sample_rate() as f32,
-        ))))
+        .send(TinexRequest::NewTrack(track))
         .map_err(|_| anyhow::anyhow!("Could not request startup PhysicalPiano track"))?;
 
     gui::run(handle)?;

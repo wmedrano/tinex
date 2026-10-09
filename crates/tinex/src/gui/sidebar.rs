@@ -9,13 +9,17 @@ use tinex_widgets::{TextRenderer, Theme, Tooltip};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Page {
     Tracks,
+    Plugins,
     Settings,
 }
 
 impl Page {
+    const ALL: [Self; 3] = [Self::Tracks, Self::Plugins, Self::Settings];
+
     fn label(self) -> &'static str {
         match self {
             Self::Tracks => "Tracks",
+            Self::Plugins => "Plugins",
             Self::Settings => "Settings",
         }
     }
@@ -23,6 +27,7 @@ impl Page {
     fn icon(self) -> &'static str {
         match self {
             Self::Tracks => "🎛️",
+            Self::Plugins => "🔌",
             Self::Settings => "⚙️",
         }
     }
@@ -30,7 +35,8 @@ impl Page {
     fn rect(self, width: f64) -> Rect {
         let y = match self {
             Self::Tracks => 76.0,
-            Self::Settings => 128.0,
+            Self::Plugins => 128.0,
+            Self::Settings => 180.0,
         };
         Rect::new(12.0, y, width - 12.0, y + 44.0)
     }
@@ -104,7 +110,7 @@ impl Sidebar {
         } else {
             scene.stroke(&Stroke::new(1.5), transform, theme.foreground, None, &pane);
         }
-        for page in [Page::Tracks, Page::Settings] {
+        for page in Page::ALL {
             let rect = page.rect(self.width());
             let color = if selected == page {
                 theme.selected_background
@@ -194,7 +200,7 @@ impl Sidebar {
         if Self::TOGGLE.contains(point) {
             return Some(Control::Toggle);
         }
-        [Page::Tracks, Page::Settings]
+        Page::ALL
             .into_iter()
             .find(|page| page.rect(self.width()).contains(point))
             .map(Control::Page)
@@ -237,7 +243,7 @@ mod tests {
                 Some(Control::Toggle)
             );
             assert_eq!(sidebar.width(), width);
-            for page in [Page::Tracks, Page::Settings] {
+            for page in Page::ALL {
                 sidebar.set_cursor(page.rect(width).center());
                 sidebar.mouse_input(ElementState::Pressed);
                 assert_eq!(
@@ -278,16 +284,20 @@ mod tests {
             assert_eq!(sidebar.width(), width);
             for scale in [1.0, 1.5, 2.0] {
                 for size in [
-                    LogicalSize::new(400.0, 160.0),
+                    LogicalSize::new(400.0, 240.0),
                     LogicalSize::new(800.0, 410.0),
                 ] {
-                    let mut scene = Scene::new();
-                    sidebar.draw(&mut scene, &mut text, &theme, Page::Tracks, size, scale);
-                    sidebar.set_cursor(Sidebar::TOGGLE.center());
-                    sidebar.draw_tooltip(&mut scene, &mut text, &theme, size, scale);
-                    assert!(!scene.encoding().is_empty());
+                    for page in Page::ALL {
+                        assert!(page.rect(width).y1 <= size.height);
+                        let mut scene = Scene::new();
+                        sidebar.draw(&mut scene, &mut text, &theme, page, size, scale);
+                        sidebar.set_cursor(page.rect(width).center());
+                        sidebar.draw_tooltip(&mut scene, &mut text, &theme, size, scale);
+                        assert!(!scene.encoding().is_empty());
+                    }
                 }
             }
+            sidebar.set_cursor(Sidebar::TOGGLE.center());
             sidebar.mouse_input(ElementState::Pressed);
             sidebar.mouse_input(ElementState::Released);
         }
@@ -303,6 +313,8 @@ mod tests {
         assert_eq!(sidebar.tooltip().unwrap().0, "Expand sidebar");
         sidebar.set_cursor(Page::Tracks.rect(sidebar.width()).center());
         assert_eq!(sidebar.tooltip().unwrap().0, "Tracks");
+        sidebar.set_cursor(Page::Plugins.rect(sidebar.width()).center());
+        assert_eq!(sidebar.tooltip().unwrap().0, "Plugins");
         sidebar.reset_input();
         assert!(sidebar.tooltip().is_none());
     }

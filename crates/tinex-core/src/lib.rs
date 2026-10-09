@@ -116,14 +116,22 @@ impl Tinex {
         for channel in args.output.iter_mut() {
             channel.fill(0.0);
         }
+        let mut buffers: [_; 4] = std::array::from_fn(|index| {
+            args._arena
+                .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
+        });
         for track in self.tracks.iter_mut() {
-            let [out_l, out_r] = args.output.each_mut();
-            track.process(
+            let output = track.process(
                 args.midi_input,
                 args.input,
-                [out_l, out_r],
+                buffers.each_mut().map(|buffer| &mut **buffer),
                 args.sample_rate,
             );
+            for (output, samples) in args.output.iter_mut().zip(output) {
+                for (output, sample) in output.iter_mut().zip(samples.iter()) {
+                    *output += sample;
+                }
+            }
         }
         let output_level = args
             .output
@@ -221,7 +229,7 @@ mod tests {
             .send(TinexRequest::OutputLevel(HashMap::new()))
             .unwrap();
         sender
-            .send(TinexRequest::NewTrack(Track::new(Passthrough)))
+            .send(TinexRequest::NewTrack(Track::with_plugin(Passthrough)))
             .unwrap();
         let arena = bumpalo::Bump::new();
         for (left, right) in [
@@ -290,24 +298,29 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        let first = Track::new(Level(1.0));
-        let second = Track::new(Level(0.5));
-        let omitted = Track::new(Level(0.25));
+        let first = Track::with_plugin(Level(1.0));
+        let second = Track::with_plugin(Level(0.5));
+        let omitted = Track::with_plugin(Level(0.25));
         let ids = [first.id(), second.id(), omitted.id()];
         let missing = TrackId::new();
         assert_eq!(first.output_level(), 0.0);
-        for track in [first, second, omitted] {
+        for track in [first, second, omitted, Track::new()] {
             sender.send(TinexRequest::NewTrack(track)).unwrap();
         }
         let arena = bumpalo::Bump::new();
         for sample in [-0.8, 0.2] {
+            let mut left = [99.0; 2];
+            let mut right = [99.0; 1];
             tinex.process(ProcessArgs {
                 sample_rate: 48_000,
                 input: [&[sample], &[]],
                 midi_input: &[],
-                output: [&mut [0.0; 2], &mut [0.0; 1]],
+                output: [&mut left, &mut right],
                 _arena: &arena,
             });
+            for output in left.into_iter().chain(right) {
+                assert!((output - sample * 1.75).abs() < 1e-6);
+            }
         }
         assert!(
             received
@@ -343,7 +356,7 @@ mod tests {
                 panic!("expected output levels");
             };
             tracks = returned;
-            assert!((output_level - expected * 0.25).abs() < 1e-6);
+            assert!((output_level - expected * 1.75).abs() < 1e-6);
             assert!((tracks[&ids[0]] - expected).abs() < 1e-6);
             assert!((tracks[&ids[1]] - expected * 0.5).abs() < 1e-6);
             assert_eq!(tracks[&missing], 0.0);
@@ -381,7 +394,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        let track = Track::new(plugin::Silence);
+        let track = Track::with_plugin(plugin::Silence);
         let id = track.id();
         sender
             .send(TinexRequest::OutputLevel(HashMap::from([(id, -1.0)])))
@@ -407,7 +420,7 @@ mod tests {
         let vector_capacity = tinex.tracks.capacity();
         for _ in 0..capacity {
             sender
-                .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+                .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
                 .unwrap();
         }
         let notifications = process(&mut tinex, &received);
@@ -420,7 +433,7 @@ mod tests {
         assert_eq!(tinex.tracks.len(), capacity);
 
         sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
             .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
@@ -432,7 +445,7 @@ mod tests {
         sender
             .send(TinexRequest::DeleteTrack(tinex.tracks[0].id()))
             .unwrap();
-        let replacement = Track::new(plugin::Silence);
+        let replacement = Track::with_plugin(plugin::Silence);
         let replacement_id = replacement.id();
         sender.send(TinexRequest::NewTrack(replacement)).unwrap();
         assert!(matches!(
@@ -449,9 +462,9 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        let first = Track::new(plugin::Silence);
+        let first = Track::with_plugin(plugin::Silence);
         let first_id = first.id();
-        let second = Track::new(plugin::Silence);
+        let second = Track::with_plugin(plugin::Silence);
         let second_id = second.id();
         sender.send(TinexRequest::NewTrack(first)).unwrap();
         sender.send(TinexRequest::DeleteTrack(first_id)).unwrap();
@@ -484,7 +497,7 @@ mod tests {
         let mut tinex = Tinex::new(receiver, notifications);
         sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
         sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
             .unwrap();
         sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
         assert!(matches!(
@@ -500,9 +513,9 @@ mod tests {
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
         let tracks = [
-            Track::new(plugin::Silence),
-            Track::new(plugin::Silence),
-            Track::new(plugin::Silence),
+            Track::with_plugin(plugin::Silence),
+            Track::with_plugin(plugin::Silence),
+            Track::with_plugin(plugin::Silence),
         ];
         let ids = tracks.each_ref().map(Track::id);
         for track in tracks {
@@ -528,7 +541,7 @@ mod tests {
         drop(received);
         let mut tinex = Tinex::new(receiver, notifications);
         sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
             .unwrap();
         drop(sender);
         tinex.process(ProcessArgs {

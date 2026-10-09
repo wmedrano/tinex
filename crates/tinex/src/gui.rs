@@ -43,6 +43,7 @@ struct App {
     window: Option<Arc<Window>>,
     scene: Scene,
     tracks: UiTracks,
+    plugins: UiPlugins,
     meters: UiMeters,
     create_track_button: CreateTrackButton,
     page: Page,
@@ -63,6 +64,7 @@ impl App {
             window: None,
             scene: Scene::new(),
             tracks: UiTracks::default(),
+            plugins: UiPlugins::default(),
             meters: UiMeters::default(),
             create_track_button: CreateTrackButton::default(),
             page: Page::Tracks,
@@ -146,15 +148,29 @@ impl App {
             size,
             scale,
         );
-        if self.page == Page::Settings {
-            self.text.draw(
-                &mut self.scene,
-                "Settings",
-                Point::new(self.sidebar.width() + 32.0, 32.0),
-                scale,
-                self.theme.foreground,
-            );
-            return;
+        match self.page {
+            Page::Tracks => {}
+            Page::Plugins => {
+                self.plugins.draw(
+                    &mut self.scene,
+                    &mut self.text,
+                    &self.theme,
+                    size,
+                    self.sidebar.width(),
+                    scale,
+                );
+                return;
+            }
+            Page::Settings => {
+                self.text.draw(
+                    &mut self.scene,
+                    "Settings",
+                    Point::new(self.sidebar.width() + 32.0, 32.0),
+                    scale,
+                    self.theme.foreground,
+                );
+                return;
+            }
         }
         let button_color = if self.create_track_button.hovered(self.sidebar.width()) {
             if self.create_track_button.pressed {
@@ -348,7 +364,7 @@ impl ApplicationHandler for App {
             match event_loop.create_window(
                 Window::default_attributes()
                     .with_title("Tinex")
-                    .with_min_inner_size(LogicalSize::new(400.0, 200.0))
+                    .with_min_inner_size(LogicalSize::new(400.0, 280.0))
                     .with_inner_size(LogicalSize::new(800.0, 450.0)),
             ) {
                 Ok(window) => self.window = Some(Arc::new(window)),
@@ -434,13 +450,13 @@ impl ApplicationHandler for App {
                     && self
                         .create_track_button
                         .mouse_input(state, self.sidebar.width())
-                    && let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(
-                        Track::new(tinex_plugins::EPiano::new(
-                            self.handle.client.as_client().sample_rate() as f32,
-                        )),
-                    ))
                 {
-                    warn!(?error, "Could not request track creation");
+                    let track = Track::with_plugin(tinex_plugins::EPiano::new(
+                        self.handle.client.as_client().sample_rate() as f32,
+                    ));
+                    if let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(track)) {
+                        warn!(?error, "Could not request track creation");
+                    }
                 }
                 if self.page == Page::Tracks {
                     let window = self.window.as_ref().unwrap();
@@ -454,19 +470,27 @@ impl ApplicationHandler for App {
                 self.window.as_ref().unwrap().request_redraw();
                 Ok(())
             }
-            WindowEvent::MouseWheel { delta, .. } if self.page == Page::Tracks => {
+            WindowEvent::MouseWheel { delta, .. }
+                if matches!(self.page, Page::Tracks | Page::Plugins) =>
+            {
                 let window = self.window.as_ref().unwrap();
+                let stride = if self.page == Page::Plugins {
+                    PLUGIN_ROW_STRIDE
+                } else {
+                    TRACK_ROW_STRIDE
+                };
                 let rows = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => {
-                        -position.y / window.scale_factor() / TRACK_ROW_STRIDE
+                        -position.y / window.scale_factor() / stride
                     }
                 };
-                self.tracks.scroll(
-                    rows,
-                    content_size(window.inner_size().to_logical(window.scale_factor())),
-                    self.sidebar.width(),
-                );
+                let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+                match self.page {
+                    Page::Tracks => self.tracks.scroll(rows, size, self.sidebar.width()),
+                    Page::Plugins => self.plugins.scroll(rows, size, self.sidebar.width()),
+                    Page::Settings => unreachable!(),
+                }
                 window.request_redraw();
                 Ok(())
             }
@@ -585,6 +609,117 @@ const LEVEL_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
 const TRACK_ROW_HEIGHT: f64 = 48.0;
 const TRACK_ROW_STRIDE: f64 = 56.0;
 const TRACK_LIST_TOP: f64 = 88.0;
+
+const PLUGIN_ROW_HEIGHT: f64 = 56.0;
+const PLUGIN_ROW_STRIDE: f64 = 64.0;
+const PLUGIN_LIST_TOP: f64 = 80.0;
+
+struct UiPlugins {
+    plugins: Vec<tinex_plugins::PluginBuilder>,
+    scroll_offset: f64,
+}
+
+impl Default for UiPlugins {
+    fn default() -> Self {
+        Self {
+            plugins: tinex_plugins::FACTORY.to_vec(),
+            scroll_offset: 0.0,
+        }
+    }
+}
+
+impl UiPlugins {
+    fn visible_count(size: LogicalSize<f64>, sidebar_width: f64) -> usize {
+        if size.width < sidebar_width + 160.0 {
+            return 0;
+        }
+        ((size.height - 32.0 - PLUGIN_LIST_TOP + 8.0) / PLUGIN_ROW_STRIDE).max(0.0) as usize
+    }
+
+    fn scroll_offset(&self, size: LogicalSize<f64>, sidebar_width: f64) -> f64 {
+        self.scroll_offset.min(
+            self.plugins
+                .len()
+                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
+        )
+    }
+
+    fn rows(
+        &self,
+        size: LogicalSize<f64>,
+        sidebar_width: f64,
+    ) -> impl Iterator<Item = (&tinex_plugins::PluginBuilder, Rect)> {
+        self.plugins
+            .iter()
+            .skip(self.scroll_offset(size, sidebar_width).round() as usize)
+            .take(Self::visible_count(size, sidebar_width))
+            .enumerate()
+            .map(move |(index, plugin)| {
+                let y = PLUGIN_LIST_TOP + index as f64 * PLUGIN_ROW_STRIDE;
+                (
+                    plugin,
+                    Rect::new(
+                        sidebar_width + 32.0,
+                        y,
+                        size.width - 32.0,
+                        y + PLUGIN_ROW_HEIGHT,
+                    ),
+                )
+            })
+    }
+
+    fn draw(
+        &self,
+        scene: &mut Scene,
+        text: &mut TextRenderer,
+        theme: &Theme,
+        size: LogicalSize<f64>,
+        sidebar_width: f64,
+        scale: f64,
+    ) {
+        text.draw(
+            scene,
+            "Plugins",
+            Point::new(sidebar_width + 32.0, 32.0),
+            scale,
+            theme.foreground,
+        );
+        for (plugin, row) in self.rows(size, sidebar_width) {
+            let card = row.to_rounded_rect(6.0);
+            scene.fill(
+                Fill::NonZero,
+                Affine::scale(scale),
+                theme.surface,
+                None,
+                &card,
+            );
+            scene.push_layer(
+                Fill::NonZero,
+                BlendMode::default(),
+                1.0,
+                Affine::scale(scale),
+                &card,
+            );
+            text.draw(
+                scene,
+                plugin.name(),
+                Point::new(row.x0 + 16.0, row.y0 + 16.0),
+                scale,
+                theme.foreground,
+            );
+            scene.pop_layer();
+        }
+    }
+
+    fn scroll(&mut self, rows: f64, size: LogicalSize<f64>, sidebar_width: f64) {
+        self.scroll_offset = (self.scroll_offset(size, sidebar_width) + rows).clamp(
+            0.0,
+            self.plugins
+                .len()
+                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
+        );
+    }
+}
 
 #[derive(Default)]
 struct UiTracks {
@@ -801,6 +936,101 @@ mod gui_tests {
     use std::sync::mpsc;
 
     #[test]
+    fn plugin_showcase_renders_registry_at_display_scales() {
+        let plugins = UiPlugins::default();
+        let registered: Vec<_> = tinex_plugins::FACTORY
+            .iter()
+            .map(|plugin| plugin.name())
+            .collect();
+        assert_eq!(
+            plugins
+                .plugins
+                .iter()
+                .map(|plugin| plugin.name())
+                .collect::<Vec<_>>(),
+            registered,
+        );
+        let mut text = TextRenderer::new();
+        let theme = Theme::default();
+        for size in [
+            LogicalSize::new(400.0, 280.0),
+            LogicalSize::new(800.0, 450.0),
+        ] {
+            let content = content_size(size);
+            for width in [64.0, 160.0] {
+                assert!(plugins.rows(content, width).next().is_some());
+                for scale in [1.0, 1.5, 2.0] {
+                    let mut scene = Scene::new();
+                    plugins.draw(&mut scene, &mut text, &theme, content, width, scale);
+                    assert!(!scene.encoding().resources.glyph_runs.is_empty());
+                    assert!(
+                        scene
+                            .encoding()
+                            .resources
+                            .glyphs
+                            .iter()
+                            .all(|glyph| glyph.id != 0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_scrolling_reaches_every_entry_and_clamps_after_resize() {
+        let plugin = tinex_plugins::FACTORY[0];
+        let mut plugins = UiPlugins {
+            plugins: vec![plugin; 64],
+            scroll_offset: 0.0,
+        };
+        for size in [
+            LogicalSize::new(400.0, 280.0),
+            LogicalSize::new(800.0, 450.0),
+        ] {
+            let content = content_size(size);
+            for width in [64.0, 160.0] {
+                plugins.scroll(-100.0, content, width);
+                let mut seen = vec![false; plugins.plugins.len()];
+                for _ in 0..plugins.plugins.len() {
+                    for (plugin, row) in plugins.rows(content, width) {
+                        let index = plugins
+                            .plugins
+                            .iter()
+                            .position(|entry| std::ptr::eq(entry, plugin))
+                            .unwrap();
+                        seen[index] = true;
+                        assert_eq!(row.x0, width + 32.0);
+                        assert!(row.x1 <= content.width - 32.0);
+                        assert!(row.y0 >= PLUGIN_LIST_TOP);
+                        assert!(row.y1 <= content.height - 32.0);
+                    }
+                    plugins.scroll(1.0, content, width);
+                }
+                assert!(seen.into_iter().all(|seen| seen));
+                plugins.scroll(100.0, content, width);
+                assert!(std::ptr::eq(
+                    plugins.rows(content, width).last().unwrap().0,
+                    plugins.plugins.last().unwrap(),
+                ));
+                let tall = LogicalSize::new(800.0, 5000.0);
+                assert!(std::ptr::eq(
+                    plugins.rows(tall, width).next().unwrap().0,
+                    &plugins.plugins[0],
+                ));
+            }
+        }
+        plugins.plugins.clear();
+        let size = LogicalSize::new(400.0, 240.0);
+        plugins.scroll(100.0, size, 160.0);
+        assert_eq!(plugins.scroll_offset, 0.0);
+        assert_eq!(plugins.rows(size, 160.0).count(), 0);
+        assert_eq!(
+            UiPlugins::visible_count(LogicalSize::new(100.0, 50.0), 160.0),
+            0
+        );
+    }
+
+    #[test]
     fn content_geometry_and_hits_follow_sidebar_width() {
         let mut tracks = UiTracks::default();
         for _ in 0..64 {
@@ -857,7 +1087,7 @@ mod gui_tests {
     #[test]
     fn levels_follow_track_ids_and_ignore_deleted_tracks() {
         let mut tracks = UiTracks::default();
-        let first = Track::new(tinex_core::plugin::Silence);
+        let first = Track::with_plugin(tinex_core::plugin::Silence);
         let second_id = Id::new();
         tracks.on_notification(TinexNotification::TrackCreated(first.id()));
         tracks.on_notification(TinexNotification::TrackCreated(second_id));
@@ -886,7 +1116,7 @@ mod gui_tests {
         let (sender, receiver) = mpsc::channel();
         let mut tracks = UiTracks::default();
         let mut meters = UiMeters::default();
-        let first = Track::new(tinex_core::plugin::Silence);
+        let first = Track::with_plugin(tinex_core::plugin::Silence);
         let second_id = Id::new();
         tracks.on_notification(TinexNotification::TrackCreated(first.id()));
         tracks.on_notification(TinexNotification::TrackCreated(second_id));
@@ -1041,8 +1271,8 @@ mod gui_tests {
     #[test]
     fn track_metadata_follows_confirmed_lifecycle() {
         let mut tracks = UiTracks::default();
-        let first = Track::new(tinex_core::plugin::Silence);
-        let second = Track::new(tinex_core::plugin::Silence);
+        let first = Track::with_plugin(tinex_core::plugin::Silence);
+        let second = Track::with_plugin(tinex_core::plugin::Silence);
         let first_id = first.id();
         let second_id = second.id();
         for notification in [
@@ -1052,7 +1282,7 @@ mod gui_tests {
                 tracks: Default::default(),
             },
             TinexNotification::TrackCreated(second_id),
-            TinexNotification::TrackCreationFailed(Track::new(tinex_core::plugin::Silence)),
+            TinexNotification::TrackCreationFailed(Track::with_plugin(tinex_core::plugin::Silence)),
         ] {
             tracks.on_notification(notification);
         }
@@ -1064,7 +1294,7 @@ mod gui_tests {
         assert_eq!(tracks.tracks[0].id, second_id);
         assert_eq!(tracks.tracks[0].name, "track-2");
         for notification in [
-            TinexNotification::TrackDeleted(Track::new(tinex_core::plugin::Silence)),
+            TinexNotification::TrackDeleted(Track::with_plugin(tinex_core::plugin::Silence)),
             TinexNotification::TrackCreated(Id::new()),
         ] {
             tracks.on_notification(notification);
@@ -1076,8 +1306,8 @@ mod gui_tests {
     #[test]
     fn remove_click_targets_id_even_when_rows_shift() {
         let size = LogicalSize::new(800.0, 450.0);
-        let first = Track::new(tinex_core::plugin::Silence);
-        let second = Track::new(tinex_core::plugin::Silence);
+        let first = Track::with_plugin(tinex_core::plugin::Silence);
+        let second = Track::with_plugin(tinex_core::plugin::Silence);
         let mut tracks = UiTracks::default();
         for notification in [
             TinexNotification::TrackCreated(first.id()),
