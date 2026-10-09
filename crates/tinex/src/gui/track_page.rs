@@ -113,6 +113,7 @@ impl UiTrackPage {
         self.hovered(size, sidebar_width, tracks).is_some()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_tooltip(
         &self,
         scene: &mut Scene,
@@ -184,6 +185,7 @@ impl UiTrackPage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw(
         &self,
         scene: &mut Scene,

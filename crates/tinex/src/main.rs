@@ -5,7 +5,6 @@ use tracing::info;
 mod gui;
 mod jack;
 use jack::init_jack;
-use tinex_core::{TinexRequest, track::Track};
 
 /// tinex CLI
 #[derive(Parser, Debug)]

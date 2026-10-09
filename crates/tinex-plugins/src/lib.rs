@@ -1,10 +1,16 @@
 //! Tinex instrument and effect implementations.
+mod compressor;
 mod delay;
 mod epiano;
+mod motown_bass;
+mod reverb;
 mod tremolo;
 
+pub use compressor::Compressor;
 pub use delay::Delay;
 pub use epiano::EPiano;
+pub use motown_bass::MotownBass;
+pub use reverb::Reverb;
 pub use tremolo::Tremolo;
 
 use tinex_core::plugin::Plugin;
@@ -30,17 +36,29 @@ impl PluginBuilder {
 }
 
 /// Available plugin constructors.
-pub const FACTORY: [PluginBuilder; 3] = [
+pub const FACTORY: [PluginBuilder; 6] = [
     PluginBuilder {
         name: "EPiano",
         build: |sample_rate| Box::new(EPiano::new(sample_rate)),
+    },
+    PluginBuilder {
+        name: "Bass",
+        build: |sample_rate| Box::new(MotownBass::new(sample_rate)),
     },
     PluginBuilder {
         name: "Tremolo",
         build: |sample_rate| Box::new(Tremolo::new(sample_rate)),
     },
     PluginBuilder {
+        name: "Compressor",
+        build: |sample_rate| Box::new(Compressor::new(sample_rate)),
+    },
+    PluginBuilder {
         name: "Delay",
         build: |sample_rate| Box::new(Delay::new(sample_rate)),
+    },
+    PluginBuilder {
+        name: "Reverb",
+        build: |sample_rate| Box::new(Reverb::new(sample_rate)),
     },
 ];

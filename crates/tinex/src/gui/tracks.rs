@@ -97,6 +97,7 @@ impl UiTracks {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_tooltips(
         &self,
         button: &CreateTrackButton,
@@ -137,6 +138,7 @@ impl UiTracks {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn draw(
         &self,
         button: &CreateTrackButton,
