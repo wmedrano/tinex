@@ -4,6 +4,7 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
+use rayon::prelude::*;
 use wmidi::MidiMessage;
 
 use crate::{
@@ -70,6 +71,8 @@ pub struct ProcessArgs<'a, 'out> {
 
 impl Tinex {
     pub fn new(requests: Receiver<TinexRequest>, notifications: Sender<TinexNotification>) -> Self {
+        // Start Rayon before the first audio callback needs its workers.
+        let _ = rayon::current_num_threads();
         Self {
             tracks: Vec::with_capacity(TRACK_CAPACITY),
             output_level: 0.0,
@@ -80,6 +83,12 @@ impl Tinex {
 
     /// Handles pending requests, processes audio, and updates the weighted peak output level.
     pub fn process(&mut self, mut args: ProcessArgs<'_, '_>) {
+        self.handle_requests();
+        self.process_tracks(&mut args);
+        self.update_output_level(&args);
+    }
+
+    fn handle_requests(&mut self) {
         for request in self.requests.try_iter() {
             match request {
                 TinexRequest::NewTrack(track) => {
@@ -123,9 +132,21 @@ impl Tinex {
                 }
             }
         }
+    }
+
+    fn process_tracks(&mut self, args: &mut ProcessArgs<'_, '_>) {
         for channel in args.output.iter_mut() {
             channel.fill(0.0);
         }
+        let worker_count = rayon::current_num_threads();
+        if self.tracks.len() < 2 || worker_count == 1 {
+            self.process_tracks_serial(args);
+        } else {
+            self.process_tracks_parallel(args, worker_count);
+        }
+    }
+
+    fn process_tracks_serial(&mut self, args: &mut ProcessArgs<'_, '_>) {
         let mut buffers: [_; 4] = std::array::from_fn(|index| {
             args._arena
                 .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
@@ -143,6 +164,64 @@ impl Tinex {
                 }
             }
         }
+    }
+
+    fn process_tracks_parallel(&mut self, args: &mut ProcessArgs<'_, '_>, worker_count: usize) {
+        let chunk_size = self.tracks.len().div_ceil(worker_count);
+        let chunk_count = self.tracks.len().div_ceil(chunk_size);
+        let mut buffers = bumpalo::collections::Vec::with_capacity_in(chunk_count, args._arena);
+        for _ in 0..chunk_count {
+            // Four channels for Track::process and two for this chunk's mix.
+            buffers.push(std::array::from_fn::<_, 6, _>(|index| {
+                args._arena
+                    .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
+            }));
+        }
+        let midi_input = args.midi_input;
+        let input = args.input;
+        let sample_rate = args.sample_rate;
+        self.tracks
+            .par_chunks_mut(chunk_size)
+            .zip(buffers.par_iter_mut())
+            .for_each(|(tracks, buffers)| {
+                let [
+                    left,
+                    right,
+                    scratch_left,
+                    scratch_right,
+                    mix_left,
+                    mix_right,
+                ] = buffers;
+                for track in tracks {
+                    let output = track.process(
+                        midi_input,
+                        input,
+                        [
+                            &mut **left,
+                            &mut **right,
+                            &mut **scratch_left,
+                            &mut **scratch_right,
+                        ],
+                        sample_rate,
+                    );
+                    for (mix, sample) in mix_left.iter_mut().zip(output[0].iter()) {
+                        *mix += sample;
+                    }
+                    for (mix, sample) in mix_right.iter_mut().zip(output[1].iter()) {
+                        *mix += sample;
+                    }
+                }
+            });
+        for buffers in buffers.iter() {
+            for (output, mix) in args.output.iter_mut().zip(&buffers[4..]) {
+                for (output, sample) in output.iter_mut().zip(mix.iter()) {
+                    *output += sample;
+                }
+            }
+        }
+    }
+
+    fn update_output_level(&mut self, args: &ProcessArgs<'_, '_>) {
         let output_level = args
             .output
             .iter()
@@ -213,6 +292,55 @@ mod tests {
             ]
         ));
         assert!(process(&mut tinex, &received).is_empty());
+    }
+
+    #[test]
+    fn mixes_parallel_chunks_with_reused_track_buffers() {
+        struct Fill(f32);
+
+        impl plugin::Plugin for Fill {
+            fn process(
+                &mut self,
+                _: &[(usize, MidiMessage)],
+                _: [&[f32]; 2],
+                output: [&mut [f32]; 2],
+            ) {
+                for (index, channel) in output.into_iter().enumerate() {
+                    channel.fill(self.0 * (index as f32 + 1.0));
+                }
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        for value in [0.25, 0.5, -0.125] {
+            sender
+                .send(TinexRequest::NewTrack(Track::with_plugin(Fill(value))))
+                .unwrap();
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let mut left = [99.0; 3];
+        let mut right = [99.0; 2];
+        pool.install(|| {
+            let mut arena = bumpalo::Bump::new();
+            for _ in 0..2 {
+                arena.reset();
+                tinex.process(ProcessArgs {
+                    sample_rate: 48_000,
+                    input: [&[], &[]],
+                    midi_input: &[],
+                    output: [&mut left, &mut right],
+                    _arena: &arena,
+                });
+            }
+        });
+        assert_eq!(left, [0.625; 3]);
+        assert_eq!(right, [1.25; 2]);
+        assert_eq!(received.try_iter().count(), 3);
     }
 
     #[test]

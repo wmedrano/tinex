@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 bumpalo = { version = "3.20.3", features = ["collections"] }
+rayon = "1.11.0"
 wmidi = "4.0.11"
