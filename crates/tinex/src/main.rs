@@ -4,8 +4,9 @@ use tracing::info;
 
 mod gui;
 mod jack;
-mod tinex;
 use jack::init_jack;
+use tinex::tinex;
+use tinex::{TinexRequest, plugin::EPiano, track::Track};
 
 /// tinex CLI
 #[derive(Parser, Debug)]
@@ -24,6 +25,12 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
     let handle = init_jack(args.autoconnect)?;
+    handle
+        .requests
+        .send(TinexRequest::NewTrack(Track::new(EPiano::new(
+            handle.client.as_client().sample_rate() as f32,
+        ))))
+        .map_err(|_| anyhow::anyhow!("Could not request startup PhysicalPiano track"))?;
 
     gui::run(handle)?;
     tracing::info!("tinex finished");

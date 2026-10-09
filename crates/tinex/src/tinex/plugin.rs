@@ -1,6 +1,6 @@
-mod fm_piano;
+mod epiano;
 
-pub use fm_piano::FmPiano;
+pub use epiano::EPiano;
 
 use wmidi::MidiMessage;
 

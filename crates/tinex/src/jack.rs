@@ -237,14 +237,6 @@ impl jack::NotificationHandler for SharedNotificationHandler {
         jack::Control::Continue
     }
 
-    fn client_registration(&mut self, _: &jack::Client, name: &str, is_registered: bool) {
-        if is_registered {
-            info!(name, "JACK client registered");
-        } else {
-            info!(name, "JACK client removed");
-        }
-    }
-
     fn port_registration(
         &mut self,
         client: &jack::Client,
@@ -255,15 +247,6 @@ impl jack::NotificationHandler for SharedNotificationHandler {
             warn!(?port_id, ?is_registered, "Invalid port registration");
             return;
         };
-        let port_name = port
-            .name()
-            .ok()
-            .unwrap_or_else(|| "invalid-port".to_string());
-        if is_registered {
-            info!(port_name, "JACK port registered");
-        } else {
-            info!(port_name, "JACK port removed");
-        }
 
         if is_registered && self.0.autoconnect {
             self.0.autoconnect_port(client, &port);
@@ -272,15 +255,12 @@ impl jack::NotificationHandler for SharedNotificationHandler {
 
     fn port_rename(
         &mut self,
-        client: &jack::Client,
+        _: &jack::Client,
         port_id: jack::PortId,
         old_name: &str,
         new_name: &str,
     ) -> jack::Control {
-        info!(
-            port_name = log_port(client, port_id),
-            old_name, new_name, "JACK port renamed"
-        );
+        info!(port_id, old_name, new_name, "JACK port renamed");
         jack::Control::Continue
     }
 
@@ -291,17 +271,28 @@ impl jack::NotificationHandler for SharedNotificationHandler {
         port_id_b: jack::PortId,
         are_connected: bool,
     ) {
-        info!(
-            port_name_a = log_port(client, port_id_a),
-            port_name_b = log_port(client, port_id_b),
-            are_connected,
-            "JACK ports connected"
-        );
-    }
-
-    fn graph_reorder(&mut self, _: &jack::Client) -> jack::Control {
-        info!("JACK graph reordered");
-        jack::Control::Continue
+        let Some(port_a) = client.port_by_id(port_id_a) else {
+            warn!(
+                port_id_a,
+                port_id_b, are_connected, "Invalid port connection"
+            );
+            return;
+        };
+        let Some(port_b) = client.port_by_id(port_id_b) else {
+            warn!(
+                port_id_a,
+                port_id_b, are_connected, "Invalid port connection"
+            );
+            return;
+        };
+        if client.is_mine(&port_a) || client.is_mine(&port_b) {
+            info!(
+                port_name_a = port_a.name().unwrap_or_else(|_| "unknown".to_string()),
+                port_name_b = port_b.name().unwrap_or_else(|_| "unknown".to_string()),
+                are_connected,
+                "JACK ports connected"
+            );
+        }
     }
 
     fn xrun(&mut self, _: &jack::Client) -> jack::Control {
@@ -319,11 +310,4 @@ fn make_ports<PS: Clone + jack::PortSpec>(
         client.register_port(&format!("{prefix}-0"), spec.clone())?,
         client.register_port(&format!("{prefix}-1"), spec)?,
     ])
-}
-
-fn log_port(client: &jack::Client, port_id: jack::PortId) -> String {
-    client
-        .port_by_id(port_id)
-        .and_then(|port| port.name().ok())
-        .unwrap_or_else(|| "unknown".to_string())
 }

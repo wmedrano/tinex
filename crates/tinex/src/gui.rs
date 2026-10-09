@@ -294,7 +294,7 @@ impl ApplicationHandler for App {
             } => {
                 if self.create_track_button.mouse_input(state)
                     && let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(
-                        Track::new(crate::tinex::plugin::FmPiano::new(
+                        Track::new(crate::tinex::plugin::EPiano::new(
                             self.handle.client.as_client().sample_rate() as f32,
                         )),
                     ))
@@ -365,9 +365,9 @@ impl TrackSymbols {
     fn update(&mut self, notifications: impl IntoIterator<Item = TinexNotification>) {
         for notification in notifications {
             match notification {
-                TinexNotification::TrackCreated(index) => {
+                TinexNotification::TrackCreated(id) => {
                     self.count += 1;
-                    info!(index, "Track created");
+                    info!(?id, "Track created");
                 }
                 TinexNotification::TrackDeleted(_) => {
                     self.count = self.count.saturating_sub(1);
@@ -451,8 +451,10 @@ mod gui_tests {
 
     #[test]
     fn create_track_requires_a_complete_click_inside_button() {
-        let mut button = CreateTrackButton::default();
-        button.cursor = Some(Point::new(56.0, 52.0));
+        let mut button = CreateTrackButton {
+            cursor: Some(Point::new(56.0, 52.0)),
+            ..Default::default()
+        };
         assert!(!button.mouse_input(ElementState::Released));
         assert!(!button.mouse_input(ElementState::Pressed));
         assert!(button.mouse_input(ElementState::Released));
@@ -471,15 +473,15 @@ mod gui_tests {
         let mut symbols = TrackSymbols::default();
         assert_eq!(symbols.count, 0);
         symbols.update([
-            TinexNotification::TrackCreated(0),
+            TinexNotification::TrackCreated(crate::tinex::id::Id::new()),
             TinexNotification::OutputLevel(0.7),
-            TinexNotification::TrackCreated(1),
+            TinexNotification::TrackCreated(crate::tinex::id::Id::new()),
             TinexNotification::TrackCreationFailed(Track::new(crate::tinex::plugin::Silence)),
         ]);
         assert_eq!(symbols.count, 2);
         symbols.update([
             TinexNotification::TrackDeleted(Track::new(crate::tinex::plugin::Silence)),
-            TinexNotification::TrackCreated(1),
+            TinexNotification::TrackCreated(crate::tinex::id::Id::new()),
             TinexNotification::TrackDeleted(Track::new(crate::tinex::plugin::Silence)),
         ]);
         assert_eq!(symbols.count, 1);

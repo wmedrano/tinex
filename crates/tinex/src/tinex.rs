@@ -2,8 +2,9 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use wmidi::MidiMessage;
 
-use crate::tinex::track::Track;
+use crate::tinex::{id::Id, track::Track};
 
+pub mod id;
 pub mod plugin;
 pub mod track;
 
@@ -18,13 +19,13 @@ pub struct Tinex {
 #[allow(unused)]
 pub enum TinexRequest {
     NewTrack(Track),
-    DeleteTrack(usize),
+    DeleteTrack(Id<Track>),
 }
 
 #[derive(Debug)]
 #[allow(unused)]
 pub enum TinexNotification {
-    TrackCreated(usize),
+    TrackCreated(Id<Track>),
     TrackCreationFailed(Track),
     TrackDeleted(Track),
     OutputLevel(f32),
@@ -58,14 +59,12 @@ impl Tinex {
                             .send(TinexNotification::TrackCreationFailed(track));
                         continue;
                     }
-                    let index = self.tracks.len();
+                    let id = track.id();
                     self.tracks.push(track);
-                    let _ = self
-                        .notifications
-                        .send(TinexNotification::TrackCreated(index));
+                    let _ = self.notifications.send(TinexNotification::TrackCreated(id));
                 }
-                TinexRequest::DeleteTrack(index) => {
-                    if index < self.tracks.len() {
+                TinexRequest::DeleteTrack(id) => {
+                    if let Some(index) = self.tracks.iter().position(|track| track.id() == id) {
                         let track = self.tracks.remove(index);
                         let _ = self
                             .notifications
@@ -162,7 +161,7 @@ mod tests {
         assert_eq!(notifications.len(), capacity);
         for (index, notification) in notifications.iter().enumerate() {
             assert!(
-                matches!(notification, TinexNotification::TrackCreated(created) if *created == index)
+                matches!(notification, TinexNotification::TrackCreated(created) if *created == tinex.tracks[index].id())
             );
         }
         assert_eq!(tinex.tracks.len(), capacity);
@@ -177,14 +176,16 @@ mod tests {
         assert_eq!(tinex.tracks.len(), capacity);
         assert_eq!(tinex.tracks.capacity(), vector_capacity);
 
-        sender.send(TinexRequest::DeleteTrack(0)).unwrap();
         sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
+            .send(TinexRequest::DeleteTrack(tinex.tracks[0].id()))
             .unwrap();
+        let replacement = Track::new(plugin::Silence);
+        let replacement_id = replacement.id();
+        sender.send(TinexRequest::NewTrack(replacement)).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
-            [TinexNotification::TrackDeleted(Track { .. }), TinexNotification::TrackCreated(index)]
-                if *index == capacity - 1
+            [TinexNotification::TrackDeleted(Track { .. }), TinexNotification::TrackCreated(id)]
+                if *id == replacement_id
         ));
         assert_eq!(tinex.tracks.len(), capacity);
         assert_eq!(tinex.tracks.capacity(), vector_capacity);
@@ -195,27 +196,27 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
-            .unwrap();
-        sender.send(TinexRequest::DeleteTrack(0)).unwrap();
-        sender
-            .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
-            .unwrap();
+        let first = Track::new(plugin::Silence);
+        let first_id = first.id();
+        let second = Track::new(plugin::Silence);
+        let second_id = second.id();
+        sender.send(TinexRequest::NewTrack(first)).unwrap();
+        sender.send(TinexRequest::DeleteTrack(first_id)).unwrap();
+        sender.send(TinexRequest::NewTrack(second)).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
             [
-                TinexNotification::TrackCreated(0),
-                TinexNotification::TrackDeleted(Track { .. }),
-                TinexNotification::TrackCreated(0)
-            ]
+                TinexNotification::TrackCreated(created_first),
+                TinexNotification::TrackDeleted(deleted),
+                TinexNotification::TrackCreated(created_second)
+            ] if *created_first == first_id && deleted.id() == first_id && *created_second == second_id
         ));
         assert_eq!(tinex.tracks.len(), 1);
 
         assert!(process(&mut tinex, &received).is_empty());
         assert_eq!(tinex.tracks.len(), 1);
 
-        sender.send(TinexRequest::DeleteTrack(0)).unwrap();
+        sender.send(TinexRequest::DeleteTrack(second_id)).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
             [TinexNotification::TrackDeleted(Track { .. })]
@@ -224,20 +225,47 @@ mod tests {
     }
 
     #[test]
-    fn ignores_invalid_track_indices() {
+    fn ignores_unknown_track_ids() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        sender.send(TinexRequest::DeleteTrack(0)).unwrap();
+        sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
         sender
             .send(TinexRequest::NewTrack(Track::new(plugin::Silence)))
             .unwrap();
-        sender.send(TinexRequest::DeleteTrack(usize::MAX)).unwrap();
+        sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
-            [TinexNotification::TrackCreated(0)]
+            [TinexNotification::TrackCreated(id)] if *id == tinex.tracks[0].id()
         ));
         assert_eq!(tinex.tracks.len(), 1);
+    }
+
+    #[test]
+    fn deletes_by_id_after_indices_shift_and_ignores_repeated_deletion() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        let tracks = [
+            Track::new(plugin::Silence),
+            Track::new(plugin::Silence),
+            Track::new(plugin::Silence),
+        ];
+        let ids = tracks.each_ref().map(Track::id);
+        for track in tracks {
+            sender.send(TinexRequest::NewTrack(track)).unwrap();
+        }
+        process(&mut tinex, &received);
+        sender.send(TinexRequest::DeleteTrack(ids[0])).unwrap();
+        sender.send(TinexRequest::DeleteTrack(ids[0])).unwrap();
+        sender.send(TinexRequest::DeleteTrack(ids[2])).unwrap();
+        assert!(matches!(
+            process(&mut tinex, &received).as_slice(),
+            [TinexNotification::TrackDeleted(first), TinexNotification::TrackDeleted(last)]
+                if first.id() == ids[0] && last.id() == ids[2]
+        ));
+        assert_eq!(tinex.tracks.len(), 1);
+        assert_eq!(tinex.tracks[0].id(), ids[1]);
     }
 
     #[test]

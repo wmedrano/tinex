@@ -8,6 +8,7 @@ anyhow = "1"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 clap = { version = "4", features = ["derive"] }
 jack = "0.13"
+nalgebra = "0.33"
 pollster = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
