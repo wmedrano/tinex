@@ -47,6 +47,7 @@ pub(super) struct UiTrack {
     pub(super) id: Id<Track>,
     pub(super) name: String,
     pub(super) output_level: f32,
+    pub(super) plugins: Vec<String>,
 }
 
 const TRACK_ROW_HEIGHT: f64 = 48.0;
@@ -57,6 +58,7 @@ const TRACK_LIST_TOP: f64 = 88.0;
 pub(super) struct UiTracks {
     pub(super) tracks: Vec<UiTrack>,
     pending_names: HashMap<Id<Track>, String>,
+    pending_plugins: HashMap<Id<Track>, Vec<String>>,
     next_number: usize,
     scroll_offset: f64,
     pub(super) cursor: Option<Point>,
@@ -82,6 +84,17 @@ impl UiTracks {
 
     pub(super) fn cancel_pending_name(&mut self, id: Id<Track>) {
         self.pending_names.remove(&id);
+        self.pending_plugins.remove(&id);
+    }
+
+    pub(super) fn reserve_initial_plugin(&mut self, id: Id<Track>, name: &str) {
+        self.pending_plugins.insert(id, vec![name.to_owned()]);
+    }
+
+    pub(super) fn add_plugin_name(&mut self, id: Id<Track>, name: &str) {
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == id) {
+            track.plugins.push(name.to_owned());
+        }
     }
 
     pub(super) fn draw_tooltips(
@@ -231,6 +244,7 @@ impl UiTracks {
                     id,
                     name,
                     output_level: 0.0,
+                    plugins: self.pending_plugins.remove(&id).unwrap_or_default(),
                 });
                 info!(?id, "Track created");
             }
@@ -334,7 +348,7 @@ impl UiTracks {
     }
 }
 
-fn draw_trash_icon(scene: &mut Scene, button: Rect, theme: &Theme, scale: f64) {
+pub(super) fn draw_trash_icon(scene: &mut Scene, button: Rect, theme: &Theme, scale: f64) {
     let center = button.center();
     let transform = Affine::scale(scale) * Affine::translate((center.x, center.y));
     let stroke = Stroke::new(1.8);
@@ -361,11 +375,11 @@ fn draw_trash_icon(scene: &mut Scene, button: Rect, theme: &Theme, scale: f64) {
     }
 }
 
-fn remove_button_rect(row: Rect) -> Rect {
+pub(super) fn remove_button_rect(row: Rect) -> Rect {
     Rect::new(row.x1 - 82.0, row.y0 + 6.0, row.x1 - 8.0, row.y1 - 6.0)
 }
 
-fn level_meter_rect(row: Rect) -> Rect {
+pub(super) fn level_meter_rect(row: Rect) -> Rect {
     Rect::new(row.x0 + 8.0, row.y0 + 32.0, row.x1 - 90.0, row.y0 + 38.0)
 }
 
@@ -528,6 +542,23 @@ mod tests {
         }
         assert_eq!(tracks.tracks.len(), 2);
         assert_eq!(tracks.tracks[1].name, "Track 3");
+    }
+
+    #[test]
+    fn plugin_names_follow_confirmed_tracks_and_added_order() {
+        let mut tracks = UiTracks::default();
+        let created = Track::new();
+        let failed = Track::new();
+        tracks.reserve_initial_plugin(created.id(), "EPiano");
+        tracks.reserve_initial_plugin(failed.id(), "Delay");
+        assert!(tracks.tracks.is_empty());
+        tracks.on_notification(TinexNotification::TrackCreationFailed(failed));
+        tracks.on_notification(TinexNotification::TrackCreated(created.id()));
+        tracks.add_plugin_name(created.id(), "Tremolo");
+        tracks.add_plugin_name(created.id(), "Delay");
+        assert_eq!(tracks.tracks[0].plugins, ["EPiano", "Tremolo", "Delay"]);
+        tracks.on_notification(TinexNotification::TrackDeleted(created));
+        assert!(tracks.tracks.is_empty());
     }
 
     #[test]

@@ -9,16 +9,18 @@ use tinex_widgets::{TextRenderer, Theme, Tooltip};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Page {
     Tracks,
+    Track,
     Plugins,
     Settings,
 }
 
 impl Page {
-    const ALL: [Self; 3] = [Self::Tracks, Self::Plugins, Self::Settings];
+    const ALL: [Self; 4] = [Self::Tracks, Self::Track, Self::Plugins, Self::Settings];
 
     fn label(self) -> &'static str {
         match self {
             Self::Tracks => "Tracks",
+            Self::Track => "Track",
             Self::Plugins => "Plugins",
             Self::Settings => "Settings",
         }
@@ -27,6 +29,7 @@ impl Page {
     fn icon(self) -> &'static str {
         match self {
             Self::Tracks => "🎛️",
+            Self::Track => "🎚️",
             Self::Plugins => "🔌",
             Self::Settings => "⚙️",
         }
@@ -34,9 +37,10 @@ impl Page {
 
     fn rect(self, width: f64) -> Rect {
         let y = match self {
-            Self::Tracks => 76.0,
-            Self::Plugins => 128.0,
-            Self::Settings => 180.0,
+            Self::Tracks => 64.0,
+            Self::Track => 108.0,
+            Self::Plugins => 152.0,
+            Self::Settings => 196.0,
         };
         Rect::new(12.0, y, width - 12.0, y + 44.0)
     }

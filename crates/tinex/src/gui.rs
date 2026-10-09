@@ -1,12 +1,14 @@
 mod graphics;
 mod plugins;
 mod sidebar;
+mod track_page;
 mod tracks;
 
 use graphics::Graphics;
 use plugins::{PLUGIN_ROW_STRIDE, PluginMenuAction, UiPlugins};
 use sidebar::{Control, Page, Sidebar};
 use tinex_widgets::{LevelMeter, TextRenderer, Theme};
+use track_page::{TrackAction, UiTrackPage};
 use tracks::{CreateTrackButton, TRACK_ROW_STRIDE, UiTracks};
 
 use anyhow::{Context, Result};
@@ -47,6 +49,7 @@ struct App {
     window: Option<Arc<Window>>,
     scene: Scene,
     tracks: UiTracks,
+    track_page: UiTrackPage,
     plugins: UiPlugins,
     meters: UiMeters,
     create_track_button: CreateTrackButton,
@@ -68,6 +71,7 @@ impl App {
             window: None,
             scene: Scene::new(),
             tracks: UiTracks::default(),
+            track_page: UiTrackPage::default(),
             plugins: UiPlugins::default(),
             meters: UiMeters::default(),
             create_track_button: CreateTrackButton::default(),
@@ -95,6 +99,7 @@ impl App {
                 track.push_boxed_plugin(plugin.build(sample_rate));
                 let id = track.id();
                 self.tracks.reserve_plugin_name(id, plugin.name());
+                self.tracks.reserve_initial_plugin(id, plugin.name());
                 let result = self.handle.requests.send(TinexRequest::NewTrack(track));
                 if result.is_err() {
                     self.tracks.cancel_pending_name(id);
@@ -102,10 +107,14 @@ impl App {
                 result
             }
             PluginMenuAction::AddToTrack(plugin, track_id) => {
-                self.handle.requests.send(TinexRequest::AddPlugin {
+                let result = self.handle.requests.send(TinexRequest::AddPlugin {
                     track_id,
                     plugin: plugin.build(sample_rate),
-                })
+                });
+                if result.is_ok() {
+                    self.tracks.add_plugin_name(track_id, plugin.name());
+                }
+                result
             }
         };
         if let Err(error) = result {
@@ -173,6 +182,16 @@ impl App {
                 self.sidebar.width(),
                 scale,
             );
+        } else if self.page == Page::Track {
+            self.track_page.draw_tooltip(
+                &mut self.scene,
+                &mut self.text,
+                &self.theme,
+                size,
+                self.sidebar.width(),
+                scale,
+                &self.tracks.tracks,
+            );
         }
         self.sidebar
             .draw_tooltip(&mut self.scene, &mut self.text, &self.theme, size, scale);
@@ -190,6 +209,18 @@ impl App {
         );
         match self.page {
             Page::Tracks => {}
+            Page::Track => {
+                self.track_page.draw(
+                    &mut self.scene,
+                    &mut self.text,
+                    &self.theme,
+                    size,
+                    self.sidebar.width(),
+                    scale,
+                    &self.tracks.tracks,
+                );
+                return;
+            }
             Page::Plugins => {
                 self.plugins.draw(
                     &mut self.scene,
@@ -225,17 +256,24 @@ impl App {
     }
 
     fn refresh_content_cursor(&mut self) {
-        let cursor = (self.page == Page::Tracks)
-            .then(|| self.sidebar.cursor())
-            .flatten();
-        self.create_track_button.cursor = cursor;
-        self.tracks.cursor = cursor;
+        let cursor = self.sidebar.cursor();
+        let tracks_cursor = (self.page == Page::Tracks).then_some(cursor).flatten();
+        let page_cursor = (self.page == Page::Track).then_some(cursor).flatten();
+        self.create_track_button.cursor = tracks_cursor;
+        self.tracks.cursor = tracks_cursor;
+        self.track_page.set_cursor(page_cursor);
         if let Some(window) = &self.window {
             let size = content_size(window.inner_size().to_logical(window.scale_factor()));
             window.set_cursor(
                 if self.sidebar.hovered().is_some()
                     || self.create_track_button.hovered(self.sidebar.width())
                     || self.tracks.hovered(size, self.sidebar.width()).is_some()
+                    || (self.page == Page::Track
+                        && self.track_page.is_hovered(
+                            size,
+                            self.sidebar.width(),
+                            &self.tracks.tracks,
+                        ))
                 {
                     CursorIcon::Pointer
                 } else {
@@ -320,6 +358,7 @@ impl ApplicationHandler for App {
         self.create_track_button = CreateTrackButton::default();
         self.sidebar.reset_input();
         self.tracks.reset_input();
+        self.track_page.reset_input();
     }
 
     fn window_event(
@@ -355,6 +394,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
                 self.sidebar.reset_input();
                 self.tracks.reset_input();
+                self.track_page.reset_input();
                 self.plugins.close_menu();
                 self.create_track_button = CreateTrackButton::default();
                 let window = self.window.as_ref().unwrap();
@@ -408,6 +448,7 @@ impl ApplicationHandler for App {
                         self.page = page;
                     }
                     self.tracks.reset_input();
+                    self.track_page.reset_input();
                     self.create_track_button = CreateTrackButton::default();
                     self.refresh_content_cursor();
                     self.window.as_ref().unwrap().request_redraw();
@@ -418,10 +459,11 @@ impl ApplicationHandler for App {
                         .create_track_button
                         .mouse_input(state, self.sidebar.width())
                 {
-                    let track = Track::with_plugin(tinex_plugins::EPiano::new(
-                        self.handle.client.as_client().sample_rate() as f32,
-                    ));
+                    let track = Track::new();
+                    let id = track.id();
+                    self.tracks.reserve_initial_plugin(id, "EPiano");
                     if let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(track)) {
+                        self.tracks.cancel_pending_name(id);
                         warn!(?error, "Could not request track creation");
                     }
                 }
@@ -432,6 +474,29 @@ impl ApplicationHandler for App {
                         && let Err(error) = self.handle.requests.send(TinexRequest::DeleteTrack(id))
                     {
                         warn!(?error, "Could not request track deletion");
+                    }
+                }
+                if self.page == Page::Track {
+                    let window = self.window.as_ref().unwrap();
+                    let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+                    if let Some(action) = self.track_page.mouse_input(
+                        state,
+                        size,
+                        self.sidebar.width(),
+                        &self.tracks.tracks,
+                    ) {
+                        match action {
+                            TrackAction::Previous | TrackAction::Next => {
+                                self.track_page.navigate(action, &self.tracks.tracks);
+                            }
+                            TrackAction::Remove(id) => {
+                                if let Err(error) =
+                                    self.handle.requests.send(TinexRequest::DeleteTrack(id))
+                                {
+                                    warn!(?error, "Could not request track deletion");
+                                }
+                            }
+                        }
                     }
                 }
                 self.window.as_ref().unwrap().request_redraw();
@@ -450,13 +515,13 @@ impl ApplicationHandler for App {
                 Ok(())
             }
             WindowEvent::MouseWheel { delta, .. }
-                if matches!(self.page, Page::Tracks | Page::Plugins) =>
+                if matches!(self.page, Page::Tracks | Page::Track | Page::Plugins) =>
             {
                 let window = self.window.as_ref().unwrap();
-                let stride = if self.page == Page::Plugins {
-                    PLUGIN_ROW_STRIDE
-                } else {
-                    TRACK_ROW_STRIDE
+                let stride = match self.page {
+                    Page::Plugins => PLUGIN_ROW_STRIDE,
+                    Page::Track => 40.0,
+                    _ => TRACK_ROW_STRIDE,
                 };
                 let rows = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -f64::from(y),
@@ -474,6 +539,7 @@ impl ApplicationHandler for App {
                 }
                 match self.page {
                     Page::Tracks => self.tracks.scroll(rows, size, self.sidebar.width()),
+                    Page::Track => self.track_page.scroll(rows, size, &self.tracks.tracks),
                     Page::Plugins => self.plugins.scroll(rows, size, self.sidebar.width()),
                     Page::Settings => unreachable!(),
                 }
@@ -497,7 +563,12 @@ impl ApplicationHandler for App {
                     self.tracks.update_levels(&tracks);
                     self.meters.on_levels(output_level, tracks);
                 }
-                notification => self.tracks.on_notification(notification),
+                notification => {
+                    let previous_index = self.track_page.selected_index(&self.tracks.tracks);
+                    self.tracks.on_notification(notification);
+                    self.track_page
+                        .reconcile(&self.tracks.tracks, previous_index);
+                }
             }
         }
         if !self.active {
