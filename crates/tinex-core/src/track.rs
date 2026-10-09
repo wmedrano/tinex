@@ -39,6 +39,10 @@ impl Track {
         self.plugins.push(Box::new(plugin));
     }
 
+    pub fn push_boxed_plugin(&mut self, plugin: Box<dyn Plugin>) {
+        self.plugins.push(plugin);
+    }
+
     pub fn id(&self) -> TrackId {
         self.id
     }
@@ -51,17 +55,15 @@ impl Track {
 
     /// Buffers are two stereo pairs in left/right order. Returns the rendered pair.
     /// Plugins run in insertion order, each receiving the previous plugin's output.
-    /// The track clears the buffers and manages their use as output or scratch.
+    /// Plugins must write every output sample; buffer contents are otherwise unspecified.
+    /// A track without plugins writes silence to the returned pair.
     pub fn process<'buffers>(
         &mut self,
         midi: &[(usize, MidiMessage)],
         input: [&[f32]; 2],
-        mut buffers: [&'buffers mut [f32]; 4],
+        buffers: [&'buffers mut [f32]; 4],
         sample_rate: u32,
     ) -> [&'buffers mut [f32]; 2] {
-        for buffer in buffers.iter_mut() {
-            buffer.fill(0.0);
-        }
         let [left, right, scratch_left, scratch_right] = buffers;
         let mut output = [left, right];
         let mut scratch = [scratch_left, scratch_right];
@@ -70,11 +72,12 @@ impl Track {
             first.process(midi, input, [left, right]);
             for plugin in remaining {
                 std::mem::swap(&mut output, &mut scratch);
-                for channel in output.iter_mut() {
-                    channel.fill(0.0);
-                }
                 let [left, right] = output.each_mut();
                 plugin.process(midi, [&*scratch[0], &*scratch[1]], [left, right]);
+            }
+        } else {
+            for channel in &mut output {
+                channel.fill(0.0);
             }
         }
         if output.iter().any(|channel| !channel.is_empty()) {
@@ -98,12 +101,12 @@ impl Track {
 mod tests {
     use super::*;
 
-    struct AccumulatingTransform {
+    struct Transform {
         gain: f32,
         offset: f32,
     }
 
-    impl Plugin for AccumulatingTransform {
+    impl Plugin for Transform {
         fn process(
             &mut self,
             midi: &[(usize, MidiMessage)],
@@ -113,21 +116,21 @@ mod tests {
             assert_eq!(midi, &[(0, MidiMessage::Start)]);
             for (input, output) in input.into_iter().zip(output) {
                 for (input, output) in input.iter().zip(output) {
-                    *output += input * self.gain + self.offset;
+                    *output = input * self.gain + self.offset;
                 }
             }
         }
     }
 
     #[test]
-    fn chains_plugins_in_order_with_cleared_stereo_buffers_and_shared_midi() {
+    fn chains_plugins_in_order_with_reused_stereo_buffers_and_shared_midi() {
         for count in 0..=3 {
             let mut track = Track::new();
             let input = [[1.0, -2.0], [3.0, -4.0]];
             let mut expected = input;
             for index in 0..count {
                 let offset = index as f32 + 1.0;
-                track.push_plugin(AccumulatingTransform { gain: 2.0, offset });
+                track.push_plugin(Transform { gain: 2.0, offset });
                 for channel in &mut expected {
                     for sample in channel {
                         *sample = *sample * 2.0 + offset;

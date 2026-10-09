@@ -37,6 +37,10 @@ pub struct Tinex {
 #[allow(unused)]
 pub enum TinexRequest {
     NewTrack(Track),
+    AddPlugin {
+        track_id: TrackId,
+        plugin: Box<dyn plugin::Plugin>,
+    },
     DeleteTrack(Id<Track>),
     /// Updates the supplied track entries with exponentially weighted block peak levels.
     /// Missing tracks receive zero; the response returns the same map allocation.
@@ -89,6 +93,12 @@ impl Tinex {
                     let id = track.id();
                     self.tracks.push(track);
                     let _ = self.notifications.send(TinexNotification::TrackCreated(id));
+                }
+                TinexRequest::AddPlugin { track_id, plugin } => {
+                    if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
+                    {
+                        track.push_boxed_plugin(plugin);
+                    }
                 }
                 TinexRequest::OutputLevel(mut tracks) => {
                     for (id, level) in tracks.iter_mut() {

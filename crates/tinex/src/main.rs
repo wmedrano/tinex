@@ -24,21 +24,6 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
     let handle = init_jack(args.autoconnect)?;
-    let mut track = Track::new();
-    track.push_plugin(tinex_plugins::EPiano::new(
-        handle.client.as_client().sample_rate() as f32,
-    ));
-    track.push_plugin(tinex_plugins::Tremolo::new(
-        handle.client.as_client().sample_rate() as f32,
-    ));
-    track.push_plugin(tinex_plugins::Delay::new(
-        handle.client.as_client().sample_rate() as f32,
-    ));
-    handle
-        .requests
-        .send(TinexRequest::NewTrack(track))
-        .map_err(|_| anyhow::anyhow!("Could not request startup PhysicalPiano track"))?;
-
     gui::run(handle)?;
     tracing::info!("tinex finished");
     Ok(())

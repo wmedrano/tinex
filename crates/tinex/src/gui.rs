@@ -1,18 +1,22 @@
 mod graphics;
+mod plugins;
 mod sidebar;
+mod tracks;
 
 use graphics::Graphics;
+use plugins::{PLUGIN_ROW_STRIDE, PluginMenuAction, UiPlugins};
 use sidebar::{Control, Page, Sidebar};
-use tinex_widgets::{LevelMeter, TextRenderer, Theme, Tooltip};
+use tinex_widgets::{LevelMeter, TextRenderer, Theme};
+use tracks::{CreateTrackButton, TRACK_ROW_STRIDE, UiTracks};
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::warn;
 use vello::Scene;
-use vello::kurbo::{Affine, Line, Point, Rect, Stroke};
+use vello::kurbo::{Affine, Point, Rect};
 use vello::peniko::{BlendMode, Fill};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -83,6 +87,33 @@ impl App {
         event_loop.exit();
     }
 
+    fn activate_plugin_menu(&mut self, action: PluginMenuAction) {
+        let sample_rate = self.handle.client.as_client().sample_rate() as f32;
+        let result = match action {
+            PluginMenuAction::NewTrack(plugin) => {
+                let mut track = Track::new();
+                track.push_boxed_plugin(plugin.build(sample_rate));
+                let id = track.id();
+                self.tracks.reserve_plugin_name(id, plugin.name());
+                let result = self.handle.requests.send(TinexRequest::NewTrack(track));
+                if result.is_err() {
+                    self.tracks.cancel_pending_name(id);
+                }
+                result
+            }
+            PluginMenuAction::AddToTrack(plugin, track_id) => {
+                self.handle.requests.send(TinexRequest::AddPlugin {
+                    track_id,
+                    plugin: plugin.build(sample_rate),
+                })
+            }
+        };
+        if let Err(error) = result {
+            warn!(?error, "Could not request plugin assignment");
+        }
+        self.plugins.close_menu();
+    }
+
     fn initialize_graphics(&mut self) -> Result<()> {
         if !self.active {
             return Ok(());
@@ -132,8 +163,17 @@ impl App {
             &Rect::new(0.0, 0.0, size.width, size.height),
         );
         self.draw_content(size, scale);
-        self.draw_create_tooltip(scale);
-        self.draw_remove_tooltip(size, scale);
+        if self.page == Page::Tracks {
+            self.tracks.draw_tooltips(
+                &self.create_track_button,
+                &mut self.scene,
+                &mut self.text,
+                &self.theme,
+                size,
+                self.sidebar.width(),
+                scale,
+            );
+        }
         self.sidebar
             .draw_tooltip(&mut self.scene, &mut self.text, &self.theme, size, scale);
         self.scene.pop_layer();
@@ -158,6 +198,7 @@ impl App {
                     size,
                     self.sidebar.width(),
                     scale,
+                    &self.tracks.tracks,
                 );
                 return;
             }
@@ -172,124 +213,13 @@ impl App {
                 return;
             }
         }
-        let button_color = if self.create_track_button.hovered(self.sidebar.width()) {
-            if self.create_track_button.pressed {
-                self.theme.create_button_pressed
-            } else {
-                self.theme.create_button_hovered
-            }
-        } else {
-            self.theme.button_background
-        };
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            button_color,
-            None,
-            &CreateTrackButton::rect(self.sidebar.width()).to_rounded_rect(6.0),
-        );
-        // A plus sign is the initial create-track affordance.
-        for bar in [
-            Rect::new(
-                self.sidebar.width() + 46.0,
-                50.5,
-                self.sidebar.width() + 66.0,
-                53.5,
-            ),
-            Rect::new(
-                self.sidebar.width() + 54.5,
-                42.0,
-                self.sidebar.width() + 57.5,
-                62.0,
-            ),
-        ] {
-            self.scene.fill(
-                Fill::NonZero,
-                Affine::scale(scale),
-                self.theme.foreground,
-                None,
-                &bar,
-            );
-        }
-        for (track, row) in self.tracks.rows(size, self.sidebar.width()) {
-            self.scene.fill(
-                Fill::NonZero,
-                Affine::scale(scale),
-                self.theme.surface,
-                None,
-                &row.to_rounded_rect(6.0),
-            );
-            self.text.draw(
-                &mut self.scene,
-                &track.name,
-                Point::new(row.x0 + 8.0, row.y0 + 4.0),
-                scale,
-                self.theme.foreground,
-            );
-            LevelMeter(track.output_level).draw(
-                &mut self.scene,
-                &self.theme,
-                level_meter_rect(row),
-                scale,
-            );
-            let button = remove_button_rect(row);
-            let hovered = self.tracks.hovered(size, self.sidebar.width()) == Some(track.id);
-            let color = if hovered && self.tracks.pressed == Some(track.id) {
-                self.theme.remove_button_pressed
-            } else if hovered {
-                self.theme.remove_button_hovered
-            } else {
-                self.theme.button_background
-            };
-            self.scene.fill(
-                Fill::NonZero,
-                Affine::scale(scale),
-                color,
-                None,
-                &button.to_rounded_rect(4.0),
-            );
-            draw_trash_icon(&mut self.scene, button, &self.theme, scale);
-        }
-    }
-
-    fn draw_create_tooltip(&mut self, scale: f64) {
-        if self.page != Page::Tracks || !self.create_track_button.hovered(self.sidebar.width()) {
-            return;
-        }
-        let button = CreateTrackButton::rect(self.sidebar.width());
-        let x = button.x0;
-        let y = button.y1 + 4.0;
-        Tooltip("Create track").draw(
+        self.tracks.draw(
+            &self.create_track_button,
             &mut self.scene,
             &mut self.text,
             &self.theme,
-            Rect::new(x, y, x + 120.0, y + 36.0),
-            scale,
-        );
-    }
-
-    fn draw_remove_tooltip(&mut self, size: LogicalSize<f64>, scale: f64) {
-        if self.page != Page::Tracks {
-            return;
-        }
-        let Some(id) = self.tracks.hovered(size, self.sidebar.width()) else {
-            return;
-        };
-        let Some((_, row)) = self
-            .tracks
-            .rows(size, self.sidebar.width())
-            .find(|(track, _)| track.id == id)
-        else {
-            return;
-        };
-        let button = remove_button_rect(row);
-        let x = (button.x1 - 120.0).max(0.0);
-        let y = (button.y0 - 40.0).max(0.0);
-        Tooltip("Remove track").draw(
-            &mut self.scene,
-            &mut self.text,
-            &self.theme,
-            Rect::new(x, y, x + 120.0, y + 36.0),
+            size,
+            self.sidebar.width(),
             scale,
         );
     }
@@ -425,6 +355,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
                 self.sidebar.reset_input();
                 self.tracks.reset_input();
+                self.plugins.close_menu();
                 self.create_track_button = CreateTrackButton::default();
                 let window = self.window.as_ref().unwrap();
                 window.set_cursor(CursorIcon::Default);
@@ -436,6 +367,42 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if self.page == Page::Plugins && self.plugins.menu_is_open() {
+                    if state == ElementState::Released {
+                        let window = self.window.as_ref().unwrap();
+                        let size =
+                            content_size(window.inner_size().to_logical(window.scale_factor()));
+                        if let Some(action) = self.plugins.menu_action(
+                            self.sidebar.cursor(),
+                            size,
+                            &self.tracks.tracks,
+                        ) {
+                            self.activate_plugin_menu(action);
+                        } else if !self.plugins.menu_contains(
+                            self.sidebar.cursor(),
+                            size,
+                            &self.tracks.tracks,
+                        ) {
+                            self.plugins.close_menu();
+                        }
+                    }
+                    self.window.as_ref().unwrap().request_redraw();
+                    return;
+                }
+                if self.page == Page::Plugins && state == ElementState::Released {
+                    let window = self.window.as_ref().unwrap();
+                    let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+                    if let Some(plugin) = self.plugins.add_button_plugin(
+                        self.sidebar.cursor(),
+                        size,
+                        self.sidebar.width(),
+                    ) {
+                        self.plugins
+                            .open_plugin_menu(self.sidebar.cursor().unwrap(), plugin, size);
+                        window.request_redraw();
+                        return;
+                    }
+                }
                 if let Some(control) = self.sidebar.mouse_input(state) {
                     if let Control::Page(page) = control {
                         self.page = page;
@@ -470,6 +437,18 @@ impl ApplicationHandler for App {
                 self.window.as_ref().unwrap().request_redraw();
                 Ok(())
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } if self.page == Page::Plugins => {
+                let window = self.window.as_ref().unwrap();
+                let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+                self.plugins
+                    .open_menu(self.sidebar.cursor(), size, self.sidebar.width());
+                window.request_redraw();
+                Ok(())
+            }
             WindowEvent::MouseWheel { delta, .. }
                 if matches!(self.page, Page::Tracks | Page::Plugins) =>
             {
@@ -486,6 +465,13 @@ impl ApplicationHandler for App {
                     }
                 };
                 let size = content_size(window.inner_size().to_logical(window.scale_factor()));
+                if self.page == Page::Plugins
+                    && self.plugins.menu_is_open()
+                    && self.plugins.scroll_menu(rows, size, &self.tracks.tracks)
+                {
+                    window.request_redraw();
+                    return;
+                }
                 match self.page {
                     Page::Tracks => self.tracks.scroll(rows, size, self.sidebar.width()),
                     Page::Plugins => self.plugins.scroll(rows, size, self.sidebar.width()),
@@ -541,45 +527,6 @@ impl ApplicationHandler for App {
     }
 }
 
-#[derive(Default)]
-struct CreateTrackButton {
-    cursor: Option<Point>,
-    pressed: bool,
-}
-
-impl CreateTrackButton {
-    fn rect(sidebar_width: f64) -> Rect {
-        Rect::new(sidebar_width + 32.0, 32.0, sidebar_width + 80.0, 72.0)
-    }
-
-    fn hovered(&self, sidebar_width: f64) -> bool {
-        self.cursor
-            .is_some_and(|point| Self::rect(sidebar_width).contains(point))
-    }
-
-    fn mouse_input(&mut self, state: ElementState, sidebar_width: f64) -> bool {
-        match state {
-            ElementState::Pressed => {
-                self.pressed = self.hovered(sidebar_width);
-                false
-            }
-            ElementState::Released => {
-                let clicked = self.pressed && self.hovered(sidebar_width);
-                self.pressed = false;
-                clicked
-            }
-        }
-    }
-}
-
-/// Frontend metadata for a track confirmed by the audio engine.
-#[derive(Debug)]
-struct UiTrack {
-    id: Id<Track>,
-    name: String,
-    output_level: f32,
-}
-
 const BOTTOM_BAR_HEIGHT: f64 = 40.0;
 const CPU_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -606,130 +553,6 @@ fn next_update(cpu: Instant, levels: Option<Instant>) -> Instant {
 }
 
 const LEVEL_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
-const TRACK_ROW_HEIGHT: f64 = 48.0;
-const TRACK_ROW_STRIDE: f64 = 56.0;
-const TRACK_LIST_TOP: f64 = 88.0;
-
-const PLUGIN_ROW_HEIGHT: f64 = 56.0;
-const PLUGIN_ROW_STRIDE: f64 = 64.0;
-const PLUGIN_LIST_TOP: f64 = 80.0;
-
-struct UiPlugins {
-    plugins: Vec<tinex_plugins::PluginBuilder>,
-    scroll_offset: f64,
-}
-
-impl Default for UiPlugins {
-    fn default() -> Self {
-        Self {
-            plugins: tinex_plugins::FACTORY.to_vec(),
-            scroll_offset: 0.0,
-        }
-    }
-}
-
-impl UiPlugins {
-    fn visible_count(size: LogicalSize<f64>, sidebar_width: f64) -> usize {
-        if size.width < sidebar_width + 160.0 {
-            return 0;
-        }
-        ((size.height - 32.0 - PLUGIN_LIST_TOP + 8.0) / PLUGIN_ROW_STRIDE).max(0.0) as usize
-    }
-
-    fn scroll_offset(&self, size: LogicalSize<f64>, sidebar_width: f64) -> f64 {
-        self.scroll_offset.min(
-            self.plugins
-                .len()
-                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
-        )
-    }
-
-    fn rows(
-        &self,
-        size: LogicalSize<f64>,
-        sidebar_width: f64,
-    ) -> impl Iterator<Item = (&tinex_plugins::PluginBuilder, Rect)> {
-        self.plugins
-            .iter()
-            .skip(self.scroll_offset(size, sidebar_width).round() as usize)
-            .take(Self::visible_count(size, sidebar_width))
-            .enumerate()
-            .map(move |(index, plugin)| {
-                let y = PLUGIN_LIST_TOP + index as f64 * PLUGIN_ROW_STRIDE;
-                (
-                    plugin,
-                    Rect::new(
-                        sidebar_width + 32.0,
-                        y,
-                        size.width - 32.0,
-                        y + PLUGIN_ROW_HEIGHT,
-                    ),
-                )
-            })
-    }
-
-    fn draw(
-        &self,
-        scene: &mut Scene,
-        text: &mut TextRenderer,
-        theme: &Theme,
-        size: LogicalSize<f64>,
-        sidebar_width: f64,
-        scale: f64,
-    ) {
-        text.draw(
-            scene,
-            "Plugins",
-            Point::new(sidebar_width + 32.0, 32.0),
-            scale,
-            theme.foreground,
-        );
-        for (plugin, row) in self.rows(size, sidebar_width) {
-            let card = row.to_rounded_rect(6.0);
-            scene.fill(
-                Fill::NonZero,
-                Affine::scale(scale),
-                theme.surface,
-                None,
-                &card,
-            );
-            scene.push_layer(
-                Fill::NonZero,
-                BlendMode::default(),
-                1.0,
-                Affine::scale(scale),
-                &card,
-            );
-            text.draw(
-                scene,
-                plugin.name(),
-                Point::new(row.x0 + 16.0, row.y0 + 16.0),
-                scale,
-                theme.foreground,
-            );
-            scene.pop_layer();
-        }
-    }
-
-    fn scroll(&mut self, rows: f64, size: LogicalSize<f64>, sidebar_width: f64) {
-        self.scroll_offset = (self.scroll_offset(size, sidebar_width) + rows).clamp(
-            0.0,
-            self.plugins
-                .len()
-                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
-        );
-    }
-}
-
-#[derive(Default)]
-struct UiTracks {
-    tracks: Vec<UiTrack>,
-    next_number: usize,
-    scroll_offset: f64,
-    cursor: Option<Point>,
-    pressed: Option<Id<Track>>,
-}
-
 #[derive(Default)]
 struct UiMeters {
     output_level: f32,
@@ -774,342 +597,10 @@ impl UiMeters {
     }
 }
 
-impl UiTracks {
-    fn update_levels(&mut self, levels: &HashMap<Id<Track>, f32>) {
-        for track in &mut self.tracks {
-            if let Some(level) = levels.get(&track.id) {
-                track.output_level = *level;
-            }
-        }
-    }
-
-    /// Observes engine notifications to keep frontend track metadata in sync.
-    fn on_notification(&mut self, notification: TinexNotification) {
-        match notification {
-            TinexNotification::TrackCreated(id) => {
-                if self.tracks.iter().any(|track| track.id == id) {
-                    return;
-                }
-                self.next_number += 1;
-                self.tracks.push(UiTrack {
-                    id,
-                    name: format!("track-{}", self.next_number),
-                    output_level: 0.0,
-                });
-                info!(?id, "Track created");
-            }
-            TinexNotification::TrackDeleted(track) => {
-                let id = track.id();
-                self.tracks.retain(|track| track.id != id);
-                if self.pressed == Some(id) {
-                    self.pressed = None;
-                }
-                info!(?id, "Track deleted");
-            }
-            TinexNotification::TrackCreationFailed(_) => warn!("Track creation failed"),
-            TinexNotification::OutputLevel { tracks, .. } => self.update_levels(&tracks),
-        }
-    }
-
-    fn visible_count(size: LogicalSize<f64>, sidebar_width: f64) -> usize {
-        if size.width < sidebar_width + 240.0 {
-            return 0;
-        }
-        ((size.height - 32.0 - TRACK_LIST_TOP + 8.0) / TRACK_ROW_STRIDE).max(0.0) as usize
-    }
-
-    fn scroll_offset(&self, size: LogicalSize<f64>, sidebar_width: f64) -> f64 {
-        self.scroll_offset.min(
-            self.tracks
-                .len()
-                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
-        )
-    }
-
-    fn first_visible(&self, size: LogicalSize<f64>, sidebar_width: f64) -> usize {
-        self.scroll_offset(size, sidebar_width).round() as usize
-    }
-
-    fn rows(
-        &self,
-        size: LogicalSize<f64>,
-        sidebar_width: f64,
-    ) -> impl Iterator<Item = (&UiTrack, Rect)> {
-        self.tracks
-            .iter()
-            .skip(self.first_visible(size, sidebar_width))
-            .take(Self::visible_count(size, sidebar_width))
-            .enumerate()
-            .map(move |(index, track)| {
-                let y = TRACK_LIST_TOP + index as f64 * TRACK_ROW_STRIDE;
-                (
-                    track,
-                    Rect::new(
-                        sidebar_width + 32.0,
-                        y,
-                        size.width - 32.0,
-                        y + TRACK_ROW_HEIGHT,
-                    ),
-                )
-            })
-    }
-
-    fn hovered(&self, size: LogicalSize<f64>, sidebar_width: f64) -> Option<Id<Track>> {
-        let cursor = self.cursor?;
-        self.rows(size, sidebar_width)
-            .find(|(_, row)| remove_button_rect(*row).contains(cursor))
-            .map(|(track, _)| track.id)
-    }
-
-    fn mouse_input(
-        &mut self,
-        state: ElementState,
-        size: LogicalSize<f64>,
-        sidebar_width: f64,
-    ) -> Option<Id<Track>> {
-        match state {
-            ElementState::Pressed => {
-                self.pressed = self.hovered(size, sidebar_width);
-                None
-            }
-            ElementState::Released => self
-                .pressed
-                .take()
-                .filter(|id| Some(*id) == self.hovered(size, sidebar_width)),
-        }
-    }
-
-    fn reset_input(&mut self) {
-        self.cursor = None;
-        self.pressed = None;
-    }
-
-    fn scroll(&mut self, rows: f64, size: LogicalSize<f64>, sidebar_width: f64) {
-        self.scroll_offset = (self.scroll_offset(size, sidebar_width) + rows).clamp(
-            0.0,
-            self.tracks
-                .len()
-                .saturating_sub(Self::visible_count(size, sidebar_width)) as f64,
-        );
-        self.pressed = None;
-    }
-}
-
-fn draw_trash_icon(scene: &mut Scene, button: Rect, theme: &Theme, scale: f64) {
-    let center = button.center();
-    let transform = Affine::scale(scale) * Affine::translate((center.x, center.y));
-    let stroke = Stroke::new(1.8);
-    scene.stroke(
-        &stroke,
-        transform,
-        theme.remove_icon,
-        None,
-        &Rect::new(-7.0, -5.0, 7.0, 10.0).to_rounded_rect(2.0),
-    );
-    scene.stroke(
-        &stroke,
-        transform,
-        theme.remove_icon,
-        None,
-        &Rect::new(-3.0, -10.0, 3.0, -7.0).to_rounded_rect(1.0),
-    );
-    for line in [
-        Line::new((-10.0, -7.0), (10.0, -7.0)),
-        Line::new((-2.5, -2.0), (-2.5, 6.0)),
-        Line::new((2.5, -2.0), (2.5, 6.0)),
-    ] {
-        scene.stroke(&stroke, transform, theme.remove_icon, None, &line);
-    }
-}
-
-fn remove_button_rect(row: Rect) -> Rect {
-    Rect::new(row.x1 - 82.0, row.y0 + 6.0, row.x1 - 8.0, row.y1 - 6.0)
-}
-
-fn level_meter_rect(row: Rect) -> Rect {
-    Rect::new(row.x0 + 8.0, row.y0 + 32.0, row.x1 - 90.0, row.y0 + 38.0)
-}
-
 #[cfg(test)]
 mod gui_tests {
     use super::*;
     use std::sync::mpsc;
-
-    #[test]
-    fn plugin_showcase_renders_registry_at_display_scales() {
-        let plugins = UiPlugins::default();
-        let registered: Vec<_> = tinex_plugins::FACTORY
-            .iter()
-            .map(|plugin| plugin.name())
-            .collect();
-        assert_eq!(
-            plugins
-                .plugins
-                .iter()
-                .map(|plugin| plugin.name())
-                .collect::<Vec<_>>(),
-            registered,
-        );
-        let mut text = TextRenderer::new();
-        let theme = Theme::default();
-        for size in [
-            LogicalSize::new(400.0, 280.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            let content = content_size(size);
-            for width in [64.0, 160.0] {
-                assert!(plugins.rows(content, width).next().is_some());
-                for scale in [1.0, 1.5, 2.0] {
-                    let mut scene = Scene::new();
-                    plugins.draw(&mut scene, &mut text, &theme, content, width, scale);
-                    assert!(!scene.encoding().resources.glyph_runs.is_empty());
-                    assert!(
-                        scene
-                            .encoding()
-                            .resources
-                            .glyphs
-                            .iter()
-                            .all(|glyph| glyph.id != 0)
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn plugin_scrolling_reaches_every_entry_and_clamps_after_resize() {
-        let plugin = tinex_plugins::FACTORY[0];
-        let mut plugins = UiPlugins {
-            plugins: vec![plugin; 64],
-            scroll_offset: 0.0,
-        };
-        for size in [
-            LogicalSize::new(400.0, 280.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            let content = content_size(size);
-            for width in [64.0, 160.0] {
-                plugins.scroll(-100.0, content, width);
-                let mut seen = vec![false; plugins.plugins.len()];
-                for _ in 0..plugins.plugins.len() {
-                    for (plugin, row) in plugins.rows(content, width) {
-                        let index = plugins
-                            .plugins
-                            .iter()
-                            .position(|entry| std::ptr::eq(entry, plugin))
-                            .unwrap();
-                        seen[index] = true;
-                        assert_eq!(row.x0, width + 32.0);
-                        assert!(row.x1 <= content.width - 32.0);
-                        assert!(row.y0 >= PLUGIN_LIST_TOP);
-                        assert!(row.y1 <= content.height - 32.0);
-                    }
-                    plugins.scroll(1.0, content, width);
-                }
-                assert!(seen.into_iter().all(|seen| seen));
-                plugins.scroll(100.0, content, width);
-                assert!(std::ptr::eq(
-                    plugins.rows(content, width).last().unwrap().0,
-                    plugins.plugins.last().unwrap(),
-                ));
-                let tall = LogicalSize::new(800.0, 5000.0);
-                assert!(std::ptr::eq(
-                    plugins.rows(tall, width).next().unwrap().0,
-                    &plugins.plugins[0],
-                ));
-            }
-        }
-        plugins.plugins.clear();
-        let size = LogicalSize::new(400.0, 240.0);
-        plugins.scroll(100.0, size, 160.0);
-        assert_eq!(plugins.scroll_offset, 0.0);
-        assert_eq!(plugins.rows(size, 160.0).count(), 0);
-        assert_eq!(
-            UiPlugins::visible_count(LogicalSize::new(100.0, 50.0), 160.0),
-            0
-        );
-    }
-
-    #[test]
-    fn content_geometry_and_hits_follow_sidebar_width() {
-        let mut tracks = UiTracks::default();
-        for _ in 0..64 {
-            tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
-        }
-        for size in [
-            LogicalSize::new(400.0, 200.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            let size = content_size(size);
-            tracks.scroll(3.0, size, 160.0);
-            let offset = tracks.scroll_offset;
-            let first = tracks.rows(size, 160.0).next().map(|(track, _)| track.id);
-            for width in [64.0, 160.0] {
-                assert_eq!(
-                    tracks.rows(size, width).next().map(|(track, _)| track.id),
-                    first
-                );
-                let create = CreateTrackButton::rect(width);
-                assert_eq!(create.x0, width + 32.0);
-                assert!(create.x1 <= size.width);
-                let mut button = CreateTrackButton {
-                    cursor: Some(create.center()),
-                    pressed: false,
-                };
-                button.mouse_input(ElementState::Pressed, width);
-                assert!(button.mouse_input(ElementState::Released, width));
-                let Some((id, row)) = tracks
-                    .rows(size, width)
-                    .next()
-                    .map(|(track, row)| (track.id, row))
-                else {
-                    assert_eq!(UiTracks::visible_count(size, width), 0);
-                    continue;
-                };
-                assert_eq!(row.x0, width + 32.0);
-                assert!(row.y1 <= size.height);
-                assert!(level_meter_rect(row).width() > 0.0);
-                tracks.cursor = Some(remove_button_rect(row).center());
-                tracks.mouse_input(ElementState::Pressed, size, width);
-                assert_eq!(
-                    tracks.mouse_input(ElementState::Released, size, width),
-                    Some(id)
-                );
-                tracks.reset_input();
-                assert_eq!(tracks.scroll_offset, offset);
-            }
-        }
-        let narrow = LogicalSize::new(350.0, 200.0);
-        assert_eq!(UiTracks::visible_count(narrow, 160.0), 0);
-        assert!(UiTracks::visible_count(narrow, 64.0) > 0);
-    }
-
-    #[test]
-    fn levels_follow_track_ids_and_ignore_deleted_tracks() {
-        let mut tracks = UiTracks::default();
-        let first = Track::with_plugin(tinex_core::plugin::Silence);
-        let second_id = Id::new();
-        tracks.on_notification(TinexNotification::TrackCreated(first.id()));
-        tracks.on_notification(TinexNotification::TrackCreated(second_id));
-        assert!(tracks.tracks.iter().all(|track| track.output_level == 0.0));
-
-        tracks.on_notification(TinexNotification::OutputLevel {
-            output_level: 0.9,
-            tracks: HashMap::from([(second_id, 0.75), (first.id(), 0.25)]),
-        });
-        assert_eq!(tracks.tracks[0].output_level, 0.25);
-        assert_eq!(tracks.tracks[1].output_level, 0.75);
-
-        let first_id = first.id();
-        tracks.on_notification(TinexNotification::TrackDeleted(first));
-        tracks.on_notification(TinexNotification::OutputLevel {
-            output_level: 0.9,
-            tracks: HashMap::from([(first_id, 1.0), (second_id, 0.5)]),
-        });
-        assert_eq!(tracks.tracks.len(), 1);
-        assert_eq!(tracks.tracks[0].id, second_id);
-        assert_eq!(tracks.tracks[0].output_level, 0.5);
-    }
 
     #[test]
     fn level_polling_is_paced_and_waits_for_a_response() {
@@ -1226,135 +717,5 @@ mod gui_tests {
         }
         assert!(bottom_meter_rect(LogicalSize::new(200.0, 200.0)).is_none());
         assert_eq!(content_size(LogicalSize::new(20.0, 20.0)).height, 0.0);
-    }
-
-    #[test]
-    fn meters_fit_visible_rows() {
-        let mut tracks = UiTracks::default();
-        for _ in 0..64 {
-            tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
-        }
-        for size in [
-            LogicalSize::new(400.0, 200.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            tracks.scroll(100.0, size, 160.0);
-            for (_, row) in tracks.rows(size, 160.0) {
-                let meter = level_meter_rect(row);
-                assert!(meter.width() > 0.0);
-                assert!(row.contains(meter.origin()));
-                assert!(row.contains(Point::new(meter.x1, meter.y1)));
-                assert!(meter.x1 < remove_button_rect(row).x0);
-            }
-        }
-    }
-
-    #[test]
-    fn create_track_requires_a_complete_click_inside_button() {
-        let mut button = CreateTrackButton {
-            cursor: Some(Point::new(160.0 + 56.0, 52.0)),
-            ..Default::default()
-        };
-        assert!(!button.mouse_input(ElementState::Released, 160.0));
-        assert!(!button.mouse_input(ElementState::Pressed, 160.0));
-        assert!(button.mouse_input(ElementState::Released, 160.0));
-        assert!(!button.mouse_input(ElementState::Released, 160.0));
-
-        button.mouse_input(ElementState::Pressed, 160.0);
-        button.cursor = Some(Point::new(100.0, 100.0));
-        assert!(!button.mouse_input(ElementState::Released, 160.0));
-        button.mouse_input(ElementState::Pressed, 160.0);
-        button.cursor = Some(Point::new(160.0 + 56.0, 52.0));
-        assert!(!button.mouse_input(ElementState::Released, 160.0));
-    }
-
-    #[test]
-    fn track_metadata_follows_confirmed_lifecycle() {
-        let mut tracks = UiTracks::default();
-        let first = Track::with_plugin(tinex_core::plugin::Silence);
-        let second = Track::with_plugin(tinex_core::plugin::Silence);
-        let first_id = first.id();
-        let second_id = second.id();
-        for notification in [
-            TinexNotification::TrackCreated(first_id),
-            TinexNotification::OutputLevel {
-                output_level: 0.7,
-                tracks: Default::default(),
-            },
-            TinexNotification::TrackCreated(second_id),
-            TinexNotification::TrackCreationFailed(Track::with_plugin(tinex_core::plugin::Silence)),
-        ] {
-            tracks.on_notification(notification);
-        }
-        assert_eq!(tracks.tracks[0].id, first_id);
-        assert_eq!(tracks.tracks[0].name, "track-1");
-        assert_eq!(tracks.tracks[1].name, "track-2");
-        tracks.on_notification(TinexNotification::TrackDeleted(first));
-        assert_eq!(tracks.tracks.len(), 1);
-        assert_eq!(tracks.tracks[0].id, second_id);
-        assert_eq!(tracks.tracks[0].name, "track-2");
-        for notification in [
-            TinexNotification::TrackDeleted(Track::with_plugin(tinex_core::plugin::Silence)),
-            TinexNotification::TrackCreated(Id::new()),
-        ] {
-            tracks.on_notification(notification);
-        }
-        assert_eq!(tracks.tracks.len(), 2);
-        assert_eq!(tracks.tracks[1].name, "track-3");
-    }
-
-    #[test]
-    fn remove_click_targets_id_even_when_rows_shift() {
-        let size = LogicalSize::new(800.0, 450.0);
-        let first = Track::with_plugin(tinex_core::plugin::Silence);
-        let second = Track::with_plugin(tinex_core::plugin::Silence);
-        let mut tracks = UiTracks::default();
-        for notification in [
-            TinexNotification::TrackCreated(first.id()),
-            TinexNotification::TrackCreated(second.id()),
-        ] {
-            tracks.on_notification(notification);
-        }
-        let button = remove_button_rect(tracks.rows(size, 160.0).nth(1).unwrap().1);
-        tracks.cursor = Some(button.center());
-        assert_eq!(
-            tracks.mouse_input(ElementState::Released, size, 160.0),
-            None
-        );
-        tracks.mouse_input(ElementState::Pressed, size, 160.0);
-        tracks.on_notification(TinexNotification::TrackDeleted(first));
-        assert_eq!(
-            tracks.mouse_input(ElementState::Released, size, 160.0),
-            None
-        );
-        let button = remove_button_rect(tracks.rows(size, 160.0).next().unwrap().1);
-        tracks.cursor = Some(button.center());
-        tracks.mouse_input(ElementState::Pressed, size, 160.0);
-        assert_eq!(
-            tracks.mouse_input(ElementState::Released, size, 160.0),
-            Some(second.id())
-        );
-    }
-
-    #[test]
-    fn scrolling_reaches_every_track_with_rows_inside_window() {
-        let mut tracks = UiTracks::default();
-        for _ in 0..64 {
-            tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
-        }
-        for size in [
-            LogicalSize::new(400.0, 200.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            tracks.scroll_offset = 0.0;
-            assert_eq!(tracks.rows(size, 160.0).next().unwrap().0.name, "track-1");
-            tracks.scroll(100.0, size, 160.0);
-            let rows: Vec<_> = tracks.rows(size, 160.0).collect();
-            assert_eq!(rows.last().unwrap().0.name, "track-64");
-            for (_, row) in rows {
-                assert!(row.y1 <= size.height - 32.0);
-                assert!(row.x1 <= size.width - 32.0);
-            }
-        }
     }
 }
