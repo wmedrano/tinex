@@ -1,74 +1,151 @@
+//! Weighted-peak dBFS display: unity is 0 dBFS, not the end of the scale.
 use vello::Scene;
-use vello::kurbo::{Affine, Rect};
-use vello::peniko::Fill;
+use vello::kurbo::{Affine, Line, Rect, Stroke};
+use vello::peniko::{Color, Fill};
 
-use super::theme::Theme;
+pub const METER_MIN_DB: f64 = -60.0;
+pub const METER_MAX_DB: f64 = 12.0;
 
-const MIN_DB: f64 = -60.0;
-const MAX_DB: f64 = 6.0;
-const ZERO_DB_FRACTION: f64 = -MIN_DB / (MAX_DB - MIN_DB);
+/// Keep positive overloads (including infinity), but never propagate NaN,
+/// negative amplitudes, or negative zero into presentation state.
+pub fn sanitize_level(amplitude: f32) -> f32 {
+    if amplitude > 0.0 { amplitude } else { 0.0 }
+}
 
-/// A stateless level display. Callers own measurements, layout, and update timing.
-pub struct LevelMeter(pub f32);
-
-impl LevelMeter {
-    pub fn draw(&self, scene: &mut Scene, theme: &Theme, bounds: Rect, scale: f64) {
-        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
-            return;
-        }
-        scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            theme.button_background,
-            None,
-            &bounds,
-        );
-        let [normal, over] = level_meter_segments(bounds, self.0);
-        for (fill, color) in [(normal, theme.meter_normal), (over, theme.meter_over)] {
-            if fill.width() > 0.0 {
-                scene.fill(Fill::NonZero, Affine::scale(scale), color, None, &fill);
-            }
-        }
-        let zero_db_x = bounds.x0 + bounds.width() * ZERO_DB_FRACTION;
-        let tick = Rect::new(
-            (zero_db_x - 0.5).max(bounds.x0),
-            bounds.y0,
-            (zero_db_x + 0.5).min(bounds.x1),
-            bounds.y1,
-        );
-        scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            theme.meter_reference,
-            None,
-            &tick,
-        );
+pub fn amplitude_to_dbfs(amplitude: f32) -> f64 {
+    let amplitude = sanitize_level(amplitude);
+    if amplitude == 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        20.0 * f64::from(amplitude).log10()
     }
 }
 
-fn level_meter_fill(meter: Rect, level: f32) -> Rect {
-    // Callers supply linear amplitude; only the display uses decibels.
-    let fraction = if level.is_nan() || level <= 0.0 {
-        0.0
-    } else {
-        let db = 20.0 * f64::from(level).log10();
-        ((db - MIN_DB) / (MAX_DB - MIN_DB)).clamp(0.0, 1.0)
-    };
-    Rect::new(
-        meter.x0,
-        meter.y0,
-        meter.x0 + meter.width() * fraction,
-        meter.y1,
-    )
+fn position(db: f64) -> f64 {
+    ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0)
 }
 
-fn level_meter_segments(meter: Rect, level: f32) -> [Rect; 2] {
-    let fill = level_meter_fill(meter, level);
-    let split = fill.x1.min(meter.x0 + meter.width() * ZERO_DB_FRACTION);
-    [
-        Rect::new(meter.x0, meter.y0, split, meter.y1),
-        Rect::new(split, meter.y0, fill.x1, meter.y1),
-    ]
+pub struct MeterStyle {
+    pub trough: Color,
+    pub normal: Color,
+    pub warning: Color,
+    pub near_ceiling: Color,
+    pub over: Color,
+    pub reference: Color,
+}
+
+/// A noninteractive bar-only horizontal level meter with a 0 dBFS tick.
+/// Only geometry is clamped; positive dBFS levels retain their value.
+#[derive(Clone, Copy)]
+pub struct LevelMeter {
+    pub amplitude: f32,
+}
+
+impl LevelMeter {
+    pub const HEIGHT: f64 = 24.0;
+
+    pub fn new(amplitude: f32) -> Self {
+        Self {
+            amplitude: sanitize_level(amplitude),
+        }
+    }
+
+    pub fn dbfs(self) -> f64 {
+        amplitude_to_dbfs(self.amplitude)
+    }
+
+    pub fn render(self, scene: &mut Scene, rect: Rect, scale: f64, style: &MeterStyle) {
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let Some(geometry) = self.geometry(rect) else {
+            return;
+        };
+        let transform = Affine::scale(scale);
+        scene.push_clip_layer(Fill::NonZero, transform, &rect);
+        scene.fill(Fill::NonZero, transform, style.trough, None, &geometry.bar);
+        let colors = [style.normal, style.warning, style.near_ceiling, style.over];
+        for (segment, color) in geometry.segments.into_iter().zip(colors) {
+            if let Some(segment) = segment {
+                scene.fill(Fill::NonZero, transform, color, None, &segment);
+            }
+        }
+        if let Some(overflow) = geometry.overflow {
+            scene.fill(Fill::NonZero, transform, style.over, None, &overflow);
+        }
+        // Reference remains visible even at silence and above the displayed range.
+        scene.stroke(
+            &Stroke::new(1.0),
+            transform,
+            style.reference,
+            None,
+            &Line::new(
+                (geometry.reference_x, geometry.bar.y0 - 2.0),
+                (geometry.reference_x, geometry.bar.y1 + 2.0),
+            ),
+        );
+        scene.pop_layer();
+    }
+
+    fn geometry(self, rect: Rect) -> Option<Geometry> {
+        if ![
+            rect.x0,
+            rect.y0,
+            rect.x1,
+            rect.y1,
+            rect.width(),
+            rect.height(),
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            || rect.width() <= 0.0
+            || rect.height() <= 0.0
+        {
+            return None;
+        }
+        let bar = Rect::new(
+            rect.x0,
+            rect.y0 + rect.height() * 0.25,
+            rect.x1,
+            rect.y0 + rect.height() * 0.75,
+        );
+        let db = self.dbfs();
+        let fill = position(db);
+        let boundaries = [METER_MIN_DB, -12.0, -6.0, 0.0, METER_MAX_DB];
+        let segments = std::array::from_fn(|index| {
+            let start = position(boundaries[index]);
+            let end = position(boundaries[index + 1]).min(fill);
+            (end > start).then(|| {
+                Rect::new(
+                    bar.x0 + start * bar.width(),
+                    bar.y0,
+                    bar.x0 + end * bar.width(),
+                    bar.y1,
+                )
+            })
+        });
+        let overflow = (db > METER_MAX_DB).then(|| {
+            Rect::new(
+                (bar.x1 - 4.0).max(bar.x0),
+                bar.y0 - 2.0,
+                bar.x1,
+                bar.y1 + 2.0,
+            )
+        });
+        Some(Geometry {
+            bar,
+            segments,
+            reference_x: bar.x0 + position(0.0) * bar.width(),
+            overflow,
+        })
+    }
+}
+
+struct Geometry {
+    bar: Rect,
+    segments: [Option<Rect>; 4],
+    reference_x: f64,
+    overflow: Option<Rect>,
 }
 
 #[cfg(test)]
@@ -76,45 +153,113 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fill_clamps_levels_and_handles_nan() {
-        let bounds = Rect::new(10.0, 20.0, 110.0, 28.0);
-        for (level, fraction) in [
-            (-1.0, 0.0),
-            (0.0, 0.0),
-            (0.0001, 0.0),
-            (0.001, 0.0),
-            (10.0_f32.powf(-30.0 / 20.0), 30.0 / 66.0),
-            (1.0, ZERO_DB_FRACTION),
-            (10.0_f32.powf(6.0 / 20.0), 1.0),
-            (2.0, 1.0),
-            (f32::NAN, 0.0),
-            (f32::INFINITY, 1.0),
-            (f32::NEG_INFINITY, 0.0),
-        ] {
-            let fill = level_meter_fill(bounds, level);
-            assert!((fill.width() - bounds.width() * fraction).abs() < 1e-5);
-            assert_eq!(fill.x0, bounds.x0);
-            assert_eq!(fill.y0, bounds.y0);
-            assert_eq!(fill.y1, bounds.y1);
+    fn decibels_use_amplitude_not_power_and_preserve_headroom() {
+        for db in [-60.0_f64, -12.0, -6.0, 0.0, 6.0, 12.0, 24.0] {
+            let amplitude = 10.0_f64.powf(db / 20.0) as f32;
+            assert!((amplitude_to_dbfs(amplitude) - db).abs() < 0.00001);
+        }
+        assert_eq!(amplitude_to_dbfs(1.0), 0.0);
+        assert!((amplitude_to_dbfs(2.0) - 6.0206).abs() < 0.0001);
+    }
+
+    #[test]
+    fn silence_invalid_inputs_and_infinity_have_explicit_semantics() {
+        for amplitude in [0.0, -0.0, -2.0, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(sanitize_level(amplitude).to_bits(), 0.0_f32.to_bits());
+            let meter = LevelMeter::new(amplitude);
+            assert_eq!(meter.dbfs(), f64::NEG_INFINITY);
+            let geometry = meter.geometry(Rect::new(0.0, 0.0, 144.0, 40.0)).unwrap();
+            assert!(geometry.segments.iter().all(Option::is_none));
+            assert!((geometry.reference_x - 120.0).abs() < 0.00001);
+        }
+        let meter = LevelMeter::new(f32::INFINITY);
+        assert_eq!(meter.dbfs(), f64::INFINITY);
+        assert!(
+            meter
+                .geometry(Rect::new(0.0, 0.0, 144.0, 40.0))
+                .unwrap()
+                .overflow
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn bar_uses_full_width_and_is_centered_at_standard_and_compact_heights() {
+        for (width, height) in [(144.0, LevelMeter::HEIGHT), (176.0, 28.0)] {
+            let rect = Rect::new(8.0, 12.0, 8.0 + width, 12.0 + height);
+            let geometry = LevelMeter::new(1.0).geometry(rect).unwrap();
+            assert_eq!(geometry.bar.x0, rect.x0);
+            assert_eq!(geometry.bar.x1, rect.x1);
+            assert_eq!(geometry.bar.center(), rect.center());
+            assert_eq!(geometry.bar.height(), height * 0.5);
+            assert!(geometry.reference_x > rect.x0 && geometry.reference_x < rect.x1);
         }
     }
 
     #[test]
-    fn over_range_starts_at_zero_db_only_above_full_scale() {
-        let bounds = Rect::new(10.0, 20.0, 110.0, 28.0);
-        let reference = bounds.x0 + bounds.width() * ZERO_DB_FRACTION;
-        for level in [0.0, 0.5, 1.0] {
-            let [normal, over] = level_meter_segments(bounds, level);
-            assert!(normal.x1 <= reference);
-            assert_eq!(over.width(), 0.0);
+    fn levels_below_display_floor_leave_the_bar_empty() {
+        for amplitude in [0.0, 0.000001, 0.0001, 0.000999] {
+            let geometry = LevelMeter::new(amplitude)
+                .geometry(Rect::new(0.0, 0.0, 144.0, LevelMeter::HEIGHT))
+                .unwrap();
+            assert!(geometry.segments.iter().all(Option::is_none));
+            assert!(geometry.overflow.is_none());
         }
-        let [normal, over] = level_meter_segments(bounds, 1.5);
-        assert_eq!(normal.x1, reference);
-        assert_eq!(over.x0, reference);
-        assert!(over.width() > 0.0);
-        assert!(over.x1 < bounds.x1);
-        let [normal, over] = level_meter_segments(bounds, 1.0);
-        assert_eq!(normal.x1, reference);
-        assert_eq!(over.x0, reference);
+    }
+
+    #[test]
+    fn fixed_zones_fill_progressively_and_positive_values_are_distinct() {
+        let rect = Rect::new(0.0, 0.0, 144.0, 40.0);
+        let unity = LevelMeter::new(1.0).geometry(rect).unwrap();
+        assert_eq!(
+            unity
+                .segments
+                .iter()
+                .filter(|segment| segment.is_some())
+                .count(),
+            3
+        );
+        assert_eq!(unity.segments[0].unwrap().x1, 96.0); // -12 dBFS.
+        assert_eq!(unity.segments[1].unwrap().x1, 108.0); // -6 dBFS.
+        assert_eq!(unity.segments[2].unwrap().x1, 120.0); // 0 dBFS.
+        let hot = LevelMeter::new(2.0).geometry(rect).unwrap();
+        assert!(hot.segments[3].unwrap().x1 > unity.reference_x);
+        assert!(hot.segments[3].unwrap().x1 < 144.0);
+        assert!(hot.overflow.is_none());
+        let hotter = LevelMeter::new(3.0).geometry(rect).unwrap();
+        assert!(hotter.segments[3].unwrap().x1 > hot.segments[3].unwrap().x1);
+        let overflow = LevelMeter::new(16.0).geometry(rect).unwrap();
+        assert_eq!(overflow.segments[3].unwrap().x1, 144.0);
+        assert!(overflow.overflow.is_some());
+    }
+
+    #[test]
+    fn geometry_is_finite_for_narrow_rectangles_and_rejects_degenerate_bounds() {
+        for amplitude in [0.0, 1.0, 2.0, f32::INFINITY, f32::NAN] {
+            for width in [0.001, 1.0, 144.0] {
+                let geometry = LevelMeter::new(amplitude)
+                    .geometry(Rect::new(4.0, 8.0, 4.0 + width, 8.001))
+                    .unwrap();
+                for rect in std::iter::once(geometry.bar)
+                    .chain(geometry.segments.into_iter().flatten())
+                    .chain(geometry.overflow)
+                {
+                    assert!(rect.width() >= 0.0 && rect.height() >= 0.0);
+                    assert!(
+                        [rect.x0, rect.y0, rect.x1, rect.y1]
+                            .iter()
+                            .all(|value| value.is_finite())
+                    );
+                }
+            }
+            for rect in [
+                Rect::ZERO,
+                Rect::new(0.0, 0.0, -1.0, 40.0),
+                Rect::new(0.0, 0.0, f64::NAN, 40.0),
+                Rect::new(-f64::MAX, 0.0, f64::MAX, 40.0),
+            ] {
+                assert!(LevelMeter::new(amplitude).geometry(rect).is_none());
+            }
+        }
     }
 }

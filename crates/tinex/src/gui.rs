@@ -1,35 +1,36 @@
+mod action;
+mod cpu_polling;
+mod dispatch;
 mod graphics;
-mod plugins;
-mod sidebar;
-mod track_page;
-mod tracks;
-
-use graphics::Graphics;
-use plugins::{PLUGIN_ROW_STRIDE, PluginMenuAction, UiPlugins};
-use sidebar::{Control, Page, Sidebar};
-use tinex_widgets::{LevelMeter, TextRenderer, Theme};
-use track_page::{TrackAction, UiTrackPage};
-use tracks::{CreateTrackButton, TRACK_ROW_STRIDE, UiTracks};
+mod meter_polling;
+mod state;
+mod theme;
+mod update;
+mod view;
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use cpu_polling::CpuPolling;
+use dispatch::{dispatch_action, poll_notifications};
+use graphics::Graphics;
+use meter_polling::MeterPolling;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use tracing::warn;
+use theme::Theme;
+use tinex_widgets::{ActivationKey, Input, TextRenderer, Ui};
 use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect};
-use vello::peniko::{BlendMode, Fill};
+use vello::kurbo::{Point, Size};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowId};
 
 use crate::jack::TinexHandle;
-use tinex_core::id::Id;
-use tinex_core::track::Track;
-use tinex_core::{TinexNotification, TinexRequest};
+use action::{Action, UiAction};
+use state::AppState;
+
+const NOTIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 pub fn run(handle: TinexHandle) -> Result<()> {
     let event_loop = EventLoop::new().context("Could not create GUI event loop")?;
@@ -48,39 +49,44 @@ struct App {
     graphics: Graphics,
     window: Option<Arc<Window>>,
     scene: Scene,
-    tracks: UiTracks,
-    track_page: UiTrackPage,
-    plugins: UiPlugins,
-    meters: UiMeters,
-    create_track_button: CreateTrackButton,
-    page: Page,
-    sidebar: Sidebar,
-    text: TextRenderer,
     theme: Theme,
-    cpu_load: Option<f32>,
-    next_cpu_update: Instant,
+    state: AppState,
+    meter_polling: MeterPolling,
+    cpu_polling: CpuPolling,
+    ui: Ui<UiAction>,
+    text: TextRenderer,
+    cursor: Option<PhysicalPosition<f64>>,
+    shift: bool,
+    redraw_pending: bool,
+    redraw_retry_at: Option<Instant>,
+    occluded: bool,
     error: Option<anyhow::Error>,
     active: bool,
 }
 
 impl App {
     fn new(handle: TinexHandle) -> Self {
+        let state = AppState {
+            sample_rate: handle.client.as_client().sample_rate() as f32,
+            ..AppState::default()
+        };
+        let ui = Ui::new(view::view(&state), Size::new(800.0, 450.0));
         Self {
             handle,
             graphics: Graphics::new(),
             window: None,
             scene: Scene::new(),
-            tracks: UiTracks::default(),
-            track_page: UiTrackPage::default(),
-            plugins: UiPlugins::default(),
-            meters: UiMeters::default(),
-            create_track_button: CreateTrackButton::default(),
-            page: Page::Tracks,
-            sidebar: Sidebar::default(),
-            text: TextRenderer::new(),
             theme: Theme::default(),
-            cpu_load: None,
-            next_cpu_update: Instant::now(),
+            state,
+            meter_polling: MeterPolling::default(),
+            cpu_polling: CpuPolling::default(),
+            ui,
+            text: TextRenderer::new(),
+            cursor: None,
+            shift: false,
+            redraw_pending: true,
+            redraw_retry_at: None,
+            occluded: false,
             error: None,
             active: false,
         }
@@ -91,36 +97,48 @@ impl App {
         event_loop.exit();
     }
 
-    fn activate_plugin_menu(&mut self, action: PluginMenuAction) {
-        let sample_rate = self.handle.client.as_client().sample_rate() as f32;
-        let result = match action {
-            PluginMenuAction::NewTrack(plugin) => {
-                let mut track = Track::new();
-                track.push_boxed_plugin(plugin.build(sample_rate));
-                let id = track.id();
-                self.tracks.reserve_plugin_name(id, plugin.name());
-                self.tracks.reserve_initial_plugin(id, plugin.name());
-                let result = self.handle.requests.send(TinexRequest::NewTrack(track));
-                if result.is_err() {
-                    self.tracks.cancel_pending_name(id);
-                }
-                result
+    fn rebuild_view(&mut self) {
+        if let Some(window) = &self.window {
+            let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+            self.ui
+                .set_view(view::view(&self.state), Size::new(size.width, size.height));
+            if let Some(cursor) = self.cursor {
+                self.ui.input(Input::PointerMoved(logical_point(
+                    cursor,
+                    window.scale_factor(),
+                )));
             }
-            PluginMenuAction::AddToTrack(plugin, track_id) => {
-                let result = self.handle.requests.send(TinexRequest::AddPlugin {
-                    track_id,
-                    plugin: plugin.build(sample_rate),
-                });
-                if result.is_ok() {
-                    self.tracks.add_plugin_name(track_id, plugin.name());
-                }
-                result
-            }
-        };
-        if let Err(error) = result {
-            warn!(?error, "Could not request plugin assignment");
         }
-        self.plugins.close_menu();
+        self.redraw_pending = true;
+        self.redraw_retry_at = None;
+    }
+
+    fn dispatch(&mut self, action: Action) {
+        self.state.sample_rate = self.handle.client.as_client().sample_rate() as f32;
+        if dispatch_action(
+            &mut self.state,
+            action,
+            &self.handle.requests,
+            &self.handle.notifications,
+        ) {
+            self.rebuild_view();
+        }
+    }
+
+    fn input(&mut self, input: Input) {
+        // Finish traversing the widgets before dispatch changes application state.
+        let actions = self.ui.input(input);
+        for action in actions {
+            self.dispatch(Action::Ui(action));
+        }
+        self.redraw_pending = true;
+        self.redraw_retry_at = None;
+    }
+
+    fn cancel_input(&mut self) {
+        self.cursor = None;
+        self.shift = false;
+        self.input(Input::Cancel);
     }
 
     fn initialize_graphics(&mut self) -> Result<()> {
@@ -134,6 +152,10 @@ impl App {
     }
 
     fn resize(&mut self) -> Result<()> {
+        self.rebuild_view();
+        if !self.active {
+            return Ok(());
+        }
         if !self.graphics.is_ready() {
             return self.initialize_graphics();
         }
@@ -148,186 +170,38 @@ impl App {
             return Ok(());
         };
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
+        if size.width == 0 || size.height == 0 || self.occluded {
             return Ok(());
         }
+        // Keep the dirty flag until a frame actually presents, but throttle
+        // failed acquisitions so an occluded surface cannot create a busy loop.
+        self.redraw_retry_at = Some(Instant::now() + NOTIFICATION_POLL_INTERVAL);
         let Some(frame) = self.graphics.begin_frame(&window)? else {
             return Ok(());
         };
-        let scale = window.scale_factor();
-        self.draw_scene(size.to_logical(scale), scale);
-        self.graphics
-            .present(frame, &self.scene, self.theme.background, &window)
-    }
-
-    fn draw_scene(&mut self, size: LogicalSize<f64>, scale: f64) {
         self.scene.reset();
-        self.draw_bottom_bar(size, scale);
-        let size = content_size(size);
-        self.scene.push_layer(
-            Fill::NonZero,
-            BlendMode::default(),
-            1.0,
-            Affine::scale(scale),
-            &Rect::new(0.0, 0.0, size.width, size.height),
-        );
-        self.draw_content(size, scale);
-        if self.page == Page::Tracks {
-            self.tracks.draw_tooltips(
-                &self.create_track_button,
-                &mut self.scene,
-                &mut self.text,
-                &self.theme,
-                size,
-                self.sidebar.width(),
-                scale,
-            );
-        } else if self.page == Page::Track {
-            self.track_page.draw_tooltip(
-                &mut self.scene,
-                &mut self.text,
-                &self.theme,
-                size,
-                self.sidebar.width(),
-                scale,
-                &self.tracks.tracks,
-            );
-        }
-        self.sidebar
-            .draw_tooltip(&mut self.scene, &mut self.text, &self.theme, size, scale);
-        self.scene.pop_layer();
-    }
-
-    fn draw_content(&mut self, size: LogicalSize<f64>, scale: f64) {
-        self.sidebar.draw(
+        self.ui.render(
             &mut self.scene,
             &mut self.text,
-            &self.theme,
-            self.page,
-            size,
-            scale,
+            &self.theme.widgets,
+            window.scale_factor(),
         );
-        match self.page {
-            Page::Tracks => {}
-            Page::Track => {
-                self.track_page.draw(
-                    &mut self.scene,
-                    &mut self.text,
-                    &self.theme,
-                    size,
-                    self.sidebar.width(),
-                    scale,
-                    &self.tracks.tracks,
-                );
-                return;
-            }
-            Page::Plugins => {
-                self.plugins.draw(
-                    &mut self.scene,
-                    &mut self.text,
-                    &self.theme,
-                    size,
-                    self.sidebar.width(),
-                    scale,
-                    &self.tracks.tracks,
-                );
-                return;
-            }
-            Page::Settings => {
-                self.text.draw(
-                    &mut self.scene,
-                    "Settings",
-                    Point::new(self.sidebar.width() + 32.0, 32.0),
-                    scale,
-                    self.theme.foreground,
-                );
-                return;
-            }
-        }
-        self.tracks.draw(
-            &self.create_track_button,
-            &mut self.scene,
-            &mut self.text,
-            &self.theme,
-            size,
-            self.sidebar.width(),
-            scale,
-        );
+        self.graphics
+            .present(frame, &self.scene, self.theme.background, &window)?;
+        self.redraw_pending = false;
+        self.redraw_retry_at = None;
+        Ok(())
     }
+}
 
-    fn refresh_content_cursor(&mut self) {
-        let cursor = self.sidebar.cursor();
-        let tracks_cursor = (self.page == Page::Tracks).then_some(cursor).flatten();
-        let page_cursor = (self.page == Page::Track).then_some(cursor).flatten();
-        self.create_track_button.cursor = tracks_cursor;
-        self.tracks.cursor = tracks_cursor;
-        self.track_page.set_cursor(page_cursor);
-        if let Some(window) = &self.window {
-            let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-            window.set_cursor(
-                if self.sidebar.hovered().is_some()
-                    || self.create_track_button.hovered(self.sidebar.width())
-                    || self.tracks.hovered(size, self.sidebar.width()).is_some()
-                    || (self.page == Page::Track
-                        && self.track_page.is_hovered(
-                            size,
-                            self.sidebar.width(),
-                            &self.tracks.tracks,
-                        ))
-                {
-                    CursorIcon::Pointer
-                } else {
-                    CursorIcon::Default
-                },
-            );
-        }
-    }
-
-    fn draw_bottom_bar(&mut self, size: LogicalSize<f64>, scale: f64) {
-        let top = content_size(size).height;
-        let bar = Rect::new(0.0, top, size.width, size.height);
-        self.scene.push_layer(
-            Fill::NonZero,
-            BlendMode::default(),
-            1.0,
-            Affine::scale(scale),
-            &bar,
-        );
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::scale(scale),
-            self.theme.surface,
-            None,
-            &bar,
-        );
-        let load = self.cpu_load.map_or_else(
-            || "🖥️ CPU --".to_string(),
-            |load| format!("🖥️ CPU {load:.1}%"),
-        );
-        self.text.draw_right(
-            &mut self.scene,
-            &load,
-            Point::new((size.width - 16.0).max(0.0), top + 8.0),
-            scale,
-            self.theme.foreground,
-        );
-        if let Some(meter) = bottom_meter_rect(size) {
-            self.text.draw(
-                &mut self.scene,
-                "Output",
-                Point::new(16.0, top + 8.0),
-                scale,
-                self.theme.foreground,
-            );
-            LevelMeter(self.meters.output_level).draw(&mut self.scene, &self.theme, meter, scale);
-        }
-        self.scene.pop_layer();
-    }
+fn logical_point(position: PhysicalPosition<f64>, scale: f64) -> Point {
+    Point::new(position.x / scale, position.y / scale)
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.active = true;
+        self.occluded = false;
         if self.window.is_none() {
             match event_loop.create_window(
                 Window::default_attributes()
@@ -345,6 +219,7 @@ impl ApplicationHandler for App {
                 }
             }
         }
+        self.rebuild_view();
         if !self.graphics.is_ready()
             && let Err(error) = self.initialize_graphics()
         {
@@ -354,11 +229,8 @@ impl ApplicationHandler for App {
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
         self.active = false;
+        self.cancel_input();
         self.graphics.suspend();
-        self.create_track_button = CreateTrackButton::default();
-        self.sidebar.reset_input();
-        self.tracks.reset_input();
-        self.track_page.reset_input();
     }
 
     fn window_event(
@@ -376,174 +248,83 @@ impl ApplicationHandler for App {
                 Ok(())
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
-            WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::CursorMoved { position, .. } => {
-                let window = self.window.as_ref().unwrap();
-                let position = position.to_logical::<f64>(window.scale_factor());
-                if position.y
-                    < content_size(window.inner_size().to_logical(window.scale_factor())).height
-                {
-                    self.sidebar.set_cursor(Point::new(position.x, position.y));
-                } else {
-                    self.sidebar.reset_input();
-                }
-                self.refresh_content_cursor();
-                self.window.as_ref().unwrap().request_redraw();
+            WindowEvent::RedrawRequested if self.active => {
+                // OS-requested redraws also need retry semantics.
+                self.redraw_pending = true;
+                self.draw()
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                self.redraw_pending = true;
+                self.redraw_retry_at = None;
                 Ok(())
             }
-            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
-                self.sidebar.reset_input();
-                self.tracks.reset_input();
-                self.track_page.reset_input();
-                self.plugins.close_menu();
-                self.create_track_button = CreateTrackButton::default();
-                let window = self.window.as_ref().unwrap();
-                window.set_cursor(CursorIcon::Default);
-                window.request_redraw();
+            WindowEvent::Focused(false) => {
+                self.cancel_input();
+                Ok(())
+            }
+            WindowEvent::CursorMoved { position, .. } if self.active => {
+                self.cursor = Some(position);
+                let scale = self.window.as_ref().unwrap().scale_factor();
+                self.input(Input::PointerMoved(logical_point(position, scale)));
+                Ok(())
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor = None;
+                self.input(Input::PointerLeft);
                 Ok(())
             }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.page == Page::Plugins && self.plugins.menu_is_open() {
-                    if state == ElementState::Released {
-                        let window = self.window.as_ref().unwrap();
-                        let size =
-                            content_size(window.inner_size().to_logical(window.scale_factor()));
-                        if let Some(action) = self.plugins.menu_action(
-                            self.sidebar.cursor(),
-                            size,
-                            &self.tracks.tracks,
-                        ) {
-                            self.activate_plugin_menu(action);
-                        } else if !self.plugins.menu_contains(
-                            self.sidebar.cursor(),
-                            size,
-                            &self.tracks.tracks,
-                        ) {
-                            self.plugins.close_menu();
-                        }
-                    }
-                    self.window.as_ref().unwrap().request_redraw();
-                    return;
-                }
-                if self.page == Page::Plugins && state == ElementState::Released {
-                    let window = self.window.as_ref().unwrap();
-                    let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                    if let Some(plugin) = self.plugins.add_button_plugin(
-                        self.sidebar.cursor(),
-                        size,
-                        self.sidebar.width(),
-                    ) {
-                        self.plugins
-                            .open_plugin_menu(self.sidebar.cursor().unwrap(), plugin, size);
-                        window.request_redraw();
-                        return;
-                    }
-                }
-                if let Some(control) = self.sidebar.mouse_input(state) {
-                    if let Control::Page(page) = control {
-                        self.page = page;
-                    }
-                    self.tracks.reset_input();
-                    self.track_page.reset_input();
-                    self.create_track_button = CreateTrackButton::default();
-                    self.refresh_content_cursor();
-                    self.window.as_ref().unwrap().request_redraw();
-                    return;
-                }
-                if self.page == Page::Tracks
-                    && self
-                        .create_track_button
-                        .mouse_input(state, self.sidebar.width())
-                {
-                    let track = Track::new();
-                    let id = track.id();
-                    self.tracks.reserve_initial_plugin(id, "EPiano");
-                    if let Err(error) = self.handle.requests.send(TinexRequest::NewTrack(track)) {
-                        self.tracks.cancel_pending_name(id);
-                        warn!(?error, "Could not request track creation");
-                    }
-                }
-                if self.page == Page::Tracks {
-                    let window = self.window.as_ref().unwrap();
-                    let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                    if let Some(id) = self.tracks.mouse_input(state, size, self.sidebar.width())
-                        && let Err(error) = self.handle.requests.send(TinexRequest::DeleteTrack(id))
-                    {
-                        warn!(?error, "Could not request track deletion");
-                    }
-                }
-                if self.page == Page::Track {
-                    let window = self.window.as_ref().unwrap();
-                    let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                    if let Some(action) = self.track_page.mouse_input(
-                        state,
-                        size,
-                        self.sidebar.width(),
-                        &self.tracks.tracks,
-                    ) {
-                        match action {
-                            TrackAction::Previous | TrackAction::Next => {
-                                self.track_page.navigate(action, &self.tracks.tracks);
-                            }
-                            TrackAction::Remove(id) => {
-                                if let Err(error) =
-                                    self.handle.requests.send(TinexRequest::DeleteTrack(id))
-                                {
-                                    warn!(?error, "Could not request track deletion");
-                                }
-                            }
-                        }
-                    }
-                }
-                self.window.as_ref().unwrap().request_redraw();
+            } if self.active => {
+                self.input(if state == ElementState::Pressed {
+                    Input::PointerPressed
+                } else {
+                    Input::PointerReleased
+                });
                 Ok(())
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Right,
-                ..
-            } if self.page == Page::Plugins => {
-                let window = self.window.as_ref().unwrap();
-                let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                self.plugins
-                    .open_menu(self.sidebar.cursor(), size, self.sidebar.width());
-                window.request_redraw();
-                Ok(())
-            }
-            WindowEvent::MouseWheel { delta, .. }
-                if matches!(self.page, Page::Tracks | Page::Track | Page::Plugins) =>
-            {
-                let window = self.window.as_ref().unwrap();
-                let stride = match self.page {
-                    Page::Plugins => PLUGIN_ROW_STRIDE,
-                    Page::Track => 40.0,
-                    _ => TRACK_ROW_STRIDE,
-                };
-                let rows = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -f64::from(y),
+            WindowEvent::MouseWheel { delta, .. } if self.active => {
+                let delta = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -f64::from(y) * 40.0,
                     MouseScrollDelta::PixelDelta(position) => {
-                        -position.y / window.scale_factor() / stride
+                        -position.y / self.window.as_ref().unwrap().scale_factor()
                     }
                 };
-                let size = content_size(window.inner_size().to_logical(window.scale_factor()));
-                if self.page == Page::Plugins
-                    && self.plugins.menu_is_open()
-                    && self.plugins.scroll_menu(rows, size, &self.tracks.tracks)
-                {
-                    window.request_redraw();
-                    return;
+                self.input(Input::Scroll(delta));
+                Ok(())
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift = modifiers.state().shift_key();
+                Ok(())
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if self.active => {
+                match event.logical_key {
+                    Key::Named(NamedKey::Tab)
+                        if event.state == ElementState::Pressed && !event.repeat =>
+                    {
+                        self.input(Input::Tab {
+                            backwards: self.shift,
+                        })
+                    }
+                    Key::Named(NamedKey::Enter) => self.input(Input::Key {
+                        key: ActivationKey::Enter,
+                        pressed: event.state == ElementState::Pressed,
+                        repeat: event.repeat,
+                    }),
+                    Key::Named(NamedKey::Space) => self.input(Input::Key {
+                        key: ActivationKey::Space,
+                        pressed: event.state == ElementState::Pressed,
+                        repeat: event.repeat,
+                    }),
+                    _ => {}
                 }
-                match self.page {
-                    Page::Tracks => self.tracks.scroll(rows, size, self.sidebar.width()),
-                    Page::Track => self.track_page.scroll(rows, size, &self.tracks.tracks),
-                    Page::Plugins => self.plugins.scroll(rows, size, self.sidebar.width()),
-                    Page::Settings => unreachable!(),
-                }
-                window.request_redraw();
                 Ok(())
             }
             _ => Ok(()),
@@ -554,239 +335,73 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        for notification in self.handle.notifications.try_iter() {
-            match notification {
-                TinexNotification::OutputLevel {
-                    output_level,
-                    tracks,
-                } => {
-                    self.tracks.update_levels(&tracks);
-                    self.meters.on_levels(output_level, tracks);
-                }
-                notification => {
-                    let previous_index = self.track_page.selected_index(&self.tracks.tracks);
-                    self.tracks.on_notification(notification);
-                    self.track_page
-                        .reconcile(&self.tracks.tracks, previous_index);
-                }
-            }
-        }
-        if !self.active {
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        }
-
+        let mut changed = poll_notifications(
+            &mut self.state,
+            &self.handle.notifications,
+            &self.handle.requests,
+        );
+        let visible = self.active
+            && !self.occluded
+            && self.window.as_ref().is_some_and(|window| {
+                window.inner_size().width > 0 && window.inner_size().height > 0
+            });
         let now = Instant::now();
-        if cpu_update_due(now, &mut self.next_cpu_update) {
-            self.cpu_load = Some(self.handle.client.as_client().cpu_load());
+        if let Some(action) = self.meter_polling.action(now, &self.state, visible) {
+            changed |= dispatch_action(
+                &mut self.state,
+                action,
+                &self.handle.requests,
+                &self.handle.notifications,
+            );
         }
-        self.meters
-            .request_levels(now, &self.handle.requests, &self.tracks);
-        // Keep a redraw queued; presentation and the window system pace frames.
-        if self.graphics.is_ready()
+        if self.cpu_polling.due(now, visible && self.state.connected) {
+            let load = self.handle.client.as_client().cpu_load();
+            changed |= dispatch_action(
+                &mut self.state,
+                Action::CpuLoad(load),
+                &self.handle.requests,
+                &self.handle.notifications,
+            );
+        }
+        if changed {
+            self.rebuild_view();
+        }
+        if self.redraw_pending
+            && self
+                .redraw_retry_at
+                .is_none_or(|deadline| Instant::now() >= deadline)
+            && self.active
+            && !self.occluded
+            && self.graphics.is_ready()
             && let Some(window) = &self.window
+            && window.inner_size().width > 0
+            && window.inner_size().height > 0
         {
-            let size = window.inner_size();
-            if size.width != 0 && size.height != 0 {
-                window.request_redraw();
-            }
+            window.request_redraw();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next_update(
-            self.next_cpu_update,
-            self.meters.next_level_update,
-        )));
-    }
-}
-
-const BOTTOM_BAR_HEIGHT: f64 = 40.0;
-const CPU_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
-
-fn content_size(size: LogicalSize<f64>) -> LogicalSize<f64> {
-    LogicalSize::new(size.width, (size.height - BOTTOM_BAR_HEIGHT).max(0.0))
-}
-
-fn bottom_meter_rect(size: LogicalSize<f64>) -> Option<Rect> {
-    let top = content_size(size).height;
-    let right = size.width - 192.0;
-    (right >= 104.0).then(|| Rect::new(80.0, top + 16.0, right, top + 24.0))
-}
-
-fn cpu_update_due(now: Instant, next: &mut Instant) -> bool {
-    if now < *next {
-        return false;
-    }
-    *next = now + CPU_UPDATE_INTERVAL;
-    true
-}
-
-fn next_update(cpu: Instant, levels: Option<Instant>) -> Instant {
-    levels.map_or(cpu, |levels| cpu.min(levels))
-}
-
-const LEVEL_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
-#[derive(Default)]
-struct UiMeters {
-    output_level: f32,
-    level_buffer: HashMap<Id<Track>, f32>,
-    level_pending: bool,
-    next_level_update: Option<Instant>,
-}
-
-impl UiMeters {
-    fn request_levels(&mut self, now: Instant, requests: &Sender<TinexRequest>, tracks: &UiTracks) {
-        if self.next_level_update.is_some_and(|next| now < next) {
-            return;
+        // Notification polling remains active during suspension. Waiting on an
+        // overdue sample while a response is in flight would create a busy loop.
+        let now = Instant::now();
+        let mut deadline = now + NOTIFICATION_POLL_INTERVAL;
+        if let Some(sample) = self.meter_polling.deadline(now, &self.state, visible) {
+            deadline = deadline.min(sample);
         }
-        // Wake periodically even while awaiting a reply: the notification channel
-        // does not wake the window event loop itself.
-        self.next_level_update = Some(now + LEVEL_UPDATE_INTERVAL);
-        if self.level_pending {
-            return;
+        if let Some(sample) = self
+            .cpu_polling
+            .deadline(now, visible && self.state.connected)
+        {
+            deadline = deadline.min(sample);
         }
-        self.level_buffer
-            .retain(|id, _| tracks.tracks.iter().any(|track| track.id == *id));
-        for track in &tracks.tracks {
-            self.level_buffer.entry(track.id).or_insert(0.0);
+        if visible
+            && self.redraw_pending
+            && let Some(retry) = self.redraw_retry_at
+            && retry > now
+        {
+            deadline = deadline.min(retry);
         }
-        match requests.send(TinexRequest::OutputLevel(std::mem::take(
-            &mut self.level_buffer,
-        ))) {
-            Ok(()) => self.level_pending = true,
-            Err(error) => {
-                warn!("Could not request output levels");
-                if let TinexRequest::OutputLevel(tracks) = error.0 {
-                    self.level_buffer = tracks;
-                }
-            }
-        }
-    }
-
-    fn on_levels(&mut self, output_level: f32, tracks: HashMap<Id<Track>, f32>) {
-        self.output_level = output_level;
-        self.level_buffer = tracks;
-        self.level_pending = false;
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 }
 
 #[cfg(test)]
-mod gui_tests {
-    use super::*;
-    use std::sync::mpsc;
-
-    #[test]
-    fn level_polling_is_paced_and_waits_for_a_response() {
-        let (sender, receiver) = mpsc::channel();
-        let mut tracks = UiTracks::default();
-        let mut meters = UiMeters::default();
-        let first = Track::with_plugin(tinex_core::plugin::Silence);
-        let second_id = Id::new();
-        tracks.on_notification(TinexNotification::TrackCreated(first.id()));
-        tracks.on_notification(TinexNotification::TrackCreated(second_id));
-        let now = Instant::now();
-        meters.request_levels(now, &sender, &tracks);
-        let TinexRequest::OutputLevel(mut levels) = receiver.try_recv().unwrap() else {
-            panic!("expected level request");
-        };
-        assert_eq!(levels.len(), 2);
-        assert!(levels.contains_key(&first.id()));
-        assert!(levels.contains_key(&second_id));
-        let capacity = levels.capacity();
-
-        meters.request_levels(now + LEVEL_UPDATE_INTERVAL, &sender, &tracks);
-        assert!(receiver.try_recv().is_err());
-        levels.insert(second_id, 0.5);
-        let notification = TinexNotification::OutputLevel {
-            output_level: 0.5,
-            tracks: levels,
-        };
-        let TinexNotification::OutputLevel {
-            output_level,
-            tracks: levels,
-        } = notification
-        else {
-            panic!("expected levels");
-        };
-        tracks.update_levels(&levels);
-        meters.on_levels(output_level, levels);
-        assert_eq!(meters.output_level, 0.5);
-        assert_eq!(tracks.tracks[1].output_level, 0.5);
-        tracks.on_notification(TinexNotification::TrackDeleted(first));
-        let third_id = Id::new();
-        tracks.on_notification(TinexNotification::TrackCreated(third_id));
-
-        meters.request_levels(now + LEVEL_UPDATE_INTERVAL, &sender, &tracks);
-        assert!(receiver.try_recv().is_err());
-        meters.request_levels(now + LEVEL_UPDATE_INTERVAL * 2, &sender, &tracks);
-        let TinexRequest::OutputLevel(levels) = receiver.try_recv().unwrap() else {
-            panic!("expected level request");
-        };
-        assert_eq!(levels.len(), 2);
-        assert_eq!(levels[&second_id], 0.5);
-        assert_eq!(levels[&third_id], 0.0);
-        assert_eq!(levels.capacity(), capacity);
-    }
-
-    #[test]
-    fn level_polling_handles_empty_tracks_and_disconnected_engine() {
-        let (sender, receiver) = mpsc::channel();
-        let mut tracks = UiTracks::default();
-        let mut meters = UiMeters::default();
-        let now = Instant::now();
-        meters.request_levels(now, &sender, &tracks);
-        let TinexRequest::OutputLevel(levels) = receiver.try_recv().unwrap() else {
-            panic!("expected overall output request with no tracks");
-        };
-        assert!(levels.is_empty());
-        meters.on_levels(0.0, levels);
-        tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
-        drop(receiver);
-        meters.request_levels(now + LEVEL_UPDATE_INTERVAL, &sender, &tracks);
-        assert!(!meters.level_pending);
-        assert_eq!(meters.level_buffer.len(), 1);
-    }
-
-    #[test]
-    fn cpu_updates_every_two_seconds_and_wakes_with_levels() {
-        let now = Instant::now();
-        let mut next = now;
-        assert!(cpu_update_due(now, &mut next));
-        assert_eq!(next, now + Duration::from_secs(2));
-        assert!(!cpu_update_due(now + Duration::from_secs(1), &mut next));
-        assert!(cpu_update_due(now + Duration::from_secs(2), &mut next));
-        assert_eq!(
-            next_update(next, Some(now + LEVEL_UPDATE_INTERVAL)),
-            now + LEVEL_UPDATE_INTERVAL
-        );
-        assert_eq!(next_update(now, Some(next)), now);
-        assert_eq!(next_update(next, None), next);
-    }
-
-    #[test]
-    fn bottom_bar_reserves_content_and_hides_meter_when_narrow() {
-        for size in [
-            LogicalSize::new(400.0, 200.0),
-            LogicalSize::new(800.0, 450.0),
-        ] {
-            let content = content_size(size);
-            assert_eq!(content.height, size.height - BOTTOM_BAR_HEIGHT);
-            let meter = bottom_meter_rect(size).unwrap();
-            assert!(meter.y0 >= content.height);
-            assert!(meter.y1 <= size.height);
-            assert!(meter.x1 <= size.width - 192.0);
-            let mut tracks = UiTracks::default();
-            for _ in 0..64 {
-                tracks.on_notification(TinexNotification::TrackCreated(Id::new()));
-            }
-            tracks.scroll(100.0, content, 160.0);
-            assert!(
-                tracks
-                    .rows(content, 160.0)
-                    .all(|(_, row)| row.y1 <= content.height)
-            );
-            tracks.cursor = Some(Point::new(size.width - 50.0, content.height + 20.0));
-            assert!(tracks.hovered(content, 160.0).is_none());
-        }
-        assert!(bottom_meter_rect(LogicalSize::new(200.0, 200.0)).is_none());
-        assert_eq!(content_size(LogicalSize::new(20.0, 20.0)).height, 0.0);
-    }
-}
+mod tests;

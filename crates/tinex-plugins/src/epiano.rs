@@ -227,7 +227,7 @@ impl EPiano {
             }
             self.filter.push(sample);
         }
-        self.filter.output() as f32
+        (self.filter.output() * 16.0) as f32
     }
 }
 

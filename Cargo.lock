@@ -2546,6 +2546,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "rayon",
+ "tracing",
  "wmidi",
 ]
 
@@ -2555,6 +2556,7 @@ version = "0.1.0"
 dependencies = [
  "nalgebra",
  "tinex-core",
+ "tracing",
  "wmidi",
 ]
 
@@ -2563,6 +2565,7 @@ name = "tinex-widgets"
 version = "0.1.0"
 dependencies = [
  "parley",
+ "tracing",
  "vello",
 ]
 

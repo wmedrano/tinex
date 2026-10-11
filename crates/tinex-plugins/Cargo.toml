@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 tinex-core = { path = "../tinex-core" }
 nalgebra = "0.33"
+tracing = { workspace = true }
 wmidi = "4.0.11"

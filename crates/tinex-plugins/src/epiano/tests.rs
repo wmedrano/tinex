@@ -29,6 +29,21 @@ fn energy(audio: &[f32]) -> f64 {
 }
 
 #[test]
+fn final_output_is_sixteen_times_filtered_signal() {
+    let mut piano = EPiano::new(48000.0);
+    piano.note_on(Note::C4, 127);
+    let mut nonzero = false;
+    for _ in 0..4800 {
+        let sample = piano.sample();
+        // Recover the unscaled output without advancing the filter again.
+        let expected = (piano.filter.last_output * 16.0) as f32;
+        assert_eq!(sample, expected);
+        nonzero |= sample != 0.0;
+    }
+    assert!(nonzero);
+}
+
+#[test]
 fn silence_velocity_release_and_restrike() {
     let mut quiet = EPiano::new(48000.0);
     // Clone before rendering so both instruments start with independent, silent state.
@@ -310,12 +325,12 @@ fn failed_solve_retires_once_through_a_finite_fade() {
 }
 
 #[test]
-fn playable_registers_have_consistent_gain_and_polyphonic_headroom() {
+fn playable_registers_have_consistent_gain_and_bounded_polyphonic_output() {
     let mut piano = EPiano::new(48000.0);
     for note in [21, 36, 48, 60, 72, 84, 96, 108] {
         let audio = render(&mut piano, &[(0, on(Channel::Ch1, note, 127))], 12000);
         let peak = audio.iter().map(|s| s.abs()).fold(0.0, f32::max);
-        assert!((0.0275..0.045).contains(&peak), "note {note}, peak {peak}");
+        assert!((0.44..0.72).contains(&peak), "note {note}, peak {peak}");
         render(&mut piano, &[(0, cc(Channel::Ch2, 120, 0))], 0);
     }
     let mut events: Vec<_> = (40..72)
@@ -327,7 +342,9 @@ fn playable_registers_have_consistent_gain_and_polyphonic_headroom() {
     events.extend((72..104).map(|note| (480, on(Channel::Ch16, note, 127))));
     let audio = render(&mut piano, &events, 12000);
     let peak = audio.iter().map(|s| s.abs()).fold(0.0, f32::max);
-    assert!(peak < 1.0, "32 voices and steal tails, peak {peak}");
+    // The 16x output boost preserves the original bound scaled by sixteen;
+    // dense polyphony can exceed unity and is intentionally not limited.
+    assert!(peak < 16.0, "32 voices and steal tails, peak {peak}");
 }
 
 #[test]

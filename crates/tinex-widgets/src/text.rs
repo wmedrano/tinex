@@ -101,7 +101,6 @@ impl Default for TextRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Theme;
 
     #[test]
     fn emoji_sequences_use_bundled_noto_color_emoji() {
@@ -143,13 +142,7 @@ mod tests {
                 "sequence should shape into one emoji: {text}"
             );
             let mut scene = Scene::new();
-            renderer.draw(
-                &mut scene,
-                text,
-                Point::ZERO,
-                2.0,
-                Theme::default().foreground,
-            );
+            renderer.draw(&mut scene, text, Point::ZERO, 2.0, Color::WHITE);
             assert!(!scene.encoding().is_empty(), "empty scene for {text}");
         }
     }
@@ -163,7 +156,7 @@ mod tests {
             "Tracks Settings 🖥️ CPU 12.3%",
             Point::ZERO,
             2.0,
-            Theme::default().foreground,
+            Color::WHITE,
         );
         assert!(!scene.encoding().resources.glyph_runs.is_empty());
         assert!(

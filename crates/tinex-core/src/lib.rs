@@ -54,6 +54,8 @@ pub enum TinexNotification {
     TrackCreated(Id<Track>),
     TrackCreationFailed(Track),
     TrackDeleted(Track),
+    /// Confirms that a plugin was appended to this track's chain.
+    PluginAdded(TrackId),
     OutputLevel {
         output_level: f32,
         tracks: HashMap<TrackId, f32>,
@@ -107,6 +109,9 @@ impl Tinex {
                     if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
                     {
                         track.push_boxed_plugin(plugin);
+                        let _ = self
+                            .notifications
+                            .send(TinexNotification::PluginAdded(track_id));
                     }
                 }
                 TinexRequest::OutputLevel(mut tracks) => {
