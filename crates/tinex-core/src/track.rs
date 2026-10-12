@@ -1,13 +1,15 @@
 use wmidi::MidiMessage;
 
-use super::{id::Id, output_level_weight, plugin::Plugin};
+use crate::plugin::{Plugin, PluginInstance};
+
+use super::{id::Id, output_level_weight};
 
 pub type TrackId = Id<Track>;
 
 pub struct Track {
     id: TrackId,
     output_level: f64,
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Vec<PluginInstance>,
 }
 
 impl std::fmt::Debug for Track {
@@ -31,15 +33,11 @@ impl Track {
 
     pub fn with_plugin(plugin: impl Plugin) -> Self {
         let mut track = Self::new();
-        track.push_plugin(plugin);
+        track.push_plugin(PluginInstance::new(Box::new(plugin)));
         track
     }
 
-    pub fn push_plugin(&mut self, plugin: impl Plugin) {
-        self.plugins.push(Box::new(plugin));
-    }
-
-    pub fn push_boxed_plugin(&mut self, plugin: Box<dyn Plugin>) {
+    pub fn push_plugin(&mut self, plugin: PluginInstance) {
         self.plugins.push(plugin);
     }
 
@@ -105,6 +103,8 @@ impl Default for Track {
 
 #[cfg(test)]
 mod tests {
+    use crate::plugin::Plugin;
+
     use super::*;
 
     struct Transform {
@@ -136,7 +136,8 @@ mod tests {
             let mut expected = input;
             for index in 0..count {
                 let offset = index as f32 + 1.0;
-                track.push_plugin(Transform { gain: 2.0, offset });
+                let plugin = PluginInstance::new(Box::new(Transform { gain: 2.0, offset }));
+                track.push_plugin(plugin);
                 for channel in &mut expected {
                     for sample in channel {
                         *sample = *sample * 2.0 + offset;
@@ -199,7 +200,7 @@ mod tests {
         let mut decayed_levels = Vec::new();
         for history in [100, 1000] {
             let mut track = Track::new();
-            track.push_plugin(Level);
+            track.push_plugin(PluginInstance::new(Box::new(Level)));
             assert_eq!(track.output_level(), 0.0);
             for _ in 0..history {
                 process_frames(&mut track, 1.0, 480, 48_000);
@@ -228,7 +229,7 @@ mod tests {
         for sample_rate in [44_100, 48_000, 96_000] {
             for block_size in [1, 128, 1024] {
                 let mut track = Track::new();
-                track.push_plugin(Level);
+                track.push_plugin(PluginInstance::new(Box::new(Level)));
                 for (level, frames) in [
                     (1.0, sample_rate as usize),
                     (0.0, sample_rate as usize / 10),

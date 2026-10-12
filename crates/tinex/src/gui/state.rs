@@ -1,9 +1,9 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
-use tinex_core::track::TrackId;
+use tinex_core::{plugin::PluginInstanceId, track::TrackId};
 use tinex_widgets::WidgetId;
 
-pub(super) struct TrackRow {
+pub(super) struct UiTrack {
     pub id: TrackId,
     pub name: String,
     pub number: u64,
@@ -11,12 +11,20 @@ pub(super) struct TrackRow {
     pub open_button: WidgetId,
     pub delete_button: WidgetId,
     pub deleting: bool,
-    /// Confirmed plugin names in audio-chain order (including duplicates).
-    pub plugins: Vec<&'static str>,
-    /// Names awaiting engine confirmation, in request order.
-    pub pending_plugins: VecDeque<&'static str>,
+    /// Confirmed plugins in audio-chain order (including duplicates), each carrying
+    /// the id the engine uses to address it.
+    pub plugins: Vec<UiPluginInstance>,
+    /// Plugins awaiting engine confirmation, keyed by the id the engine echoes back.
+    pub pending_plugins: HashMap<PluginInstanceId, UiPluginInstance>,
     /// Linear, exponentially weighted block peak reported by the engine.
     pub output_level: f32,
+}
+
+/// A plugin on a track, addressed by the id the engine echoes back in `PluginAdded`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct UiPluginInstance {
+    pub id: PluginInstanceId,
+    pub name: &'static str,
 }
 
 pub(super) struct PendingTrack {
@@ -41,7 +49,7 @@ pub(super) struct AppState {
     pub plugin_back_button: WidgetId,
     pub plugin_buttons: [WidgetId; tinex_plugins::FACTORY.len()],
     pub sample_rate: f32,
-    pub tracks: Vec<TrackRow>,
+    pub tracks: Vec<UiTrack>,
     pub pending: HashMap<TrackId, PendingTrack>,
     pub next_number: u64,
     pub connected: bool,

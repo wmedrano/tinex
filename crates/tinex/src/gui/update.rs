@@ -2,8 +2,10 @@ use tinex_core::track::Track;
 use tinex_core::{TinexNotification, TinexRequest};
 use tinex_widgets::{WidgetId, sanitize_level};
 
+use crate::gui::state::UiPluginInstance;
+
 use super::action::{Action, Effect, Operation, UiAction};
-use super::state::{AppState, Page, PendingTrack, TrackRow};
+use super::state::{AppState, Page, PendingTrack, UiTrack};
 
 #[derive(Default)]
 pub(super) struct Update {
@@ -44,11 +46,10 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     .any(|row| row.id == track_id && !row.deleting)
                 && let Some(builder) = tinex_plugins::FACTORY.get(index)
             {
+                let plugin = builder.build(state.sample_rate);
+                let plugin_id = plugin.id();
                 result.effects.push(Effect {
-                    request: TinexRequest::AddPlugin {
-                        track_id,
-                        plugin: builder.build(state.sample_rate),
-                    },
+                    request: TinexRequest::AddPlugin { track_id, plugin },
                     operation: Operation::AddPlugin,
                 });
                 state
@@ -57,7 +58,13 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     .find(|row| row.id == track_id)
                     .expect("validated track")
                     .pending_plugins
-                    .push_back(builder.name());
+                    .insert(
+                        plugin_id,
+                        UiPluginInstance {
+                            id: plugin_id,
+                            name: builder.name(),
+                        },
+                    );
                 state.page = Page::Track(track_id);
                 state.message = None;
                 result.changed = true;
@@ -117,7 +124,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
         }
         Action::Notification(TinexNotification::TrackCreated(id)) => {
             if let Some(pending) = state.pending.remove(&id) {
-                state.tracks.push(TrackRow {
+                state.tracks.push(UiTrack {
                     id,
                     name: pending.name,
                     number: pending.number,
@@ -133,11 +140,11 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 result.changed = true;
             }
         }
-        Action::Notification(TinexNotification::PluginAdded(id)) => {
-            if let Some(row) = state.tracks.iter_mut().find(|row| row.id == id)
-                && let Some(name) = row.pending_plugins.pop_front()
+        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)) => {
+            if let Some(row) = state.tracks.iter_mut().find(|row| row.id == track_id)
+                && let Some(plugin) = row.pending_plugins.remove(&plugin_id)
             {
-                row.plugins.push(name);
+                row.plugins.push(plugin);
                 result.changed = true;
             }
         }

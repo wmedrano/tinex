@@ -1,9 +1,9 @@
 use tinex_widgets::{Tone, Widget};
 
 use super::super::action::UiAction;
-use super::super::state::{AppState, TrackRow};
+use super::super::state::{AppState, UiTrack};
 
-pub(super) fn plugin_view(state: &AppState, track: &TrackRow) -> Vec<Widget<UiAction>> {
+pub(super) fn plugin_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiAction>> {
     vec![
         Widget::Row {
             children: vec![

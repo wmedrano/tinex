@@ -1,9 +1,9 @@
 use tinex_widgets::{Tone, Widget};
 
 use super::super::action::UiAction;
-use super::super::state::{AppState, TrackRow};
+use super::super::state::{AppState, UiTrack};
 
-pub(super) fn track_view(state: &AppState, track: &TrackRow) -> Vec<Widget<UiAction>> {
+pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiAction>> {
     let mut content = vec![
         Widget::Row {
             children: vec![
@@ -27,19 +27,10 @@ pub(super) fn track_view(state: &AppState, track: &TrackRow) -> Vec<Widget<UiAct
     if track.plugins.is_empty() {
         content.push(Widget::label("No plugins on this track yet.", Tone::Muted));
     } else {
-        content.extend(
-            track
-                .plugins
-                .iter()
-                .enumerate()
-                .map(|(index, name)| Widget::Row {
-                    children: vec![Widget::label(
-                        format!("{}. {name}", index + 1),
-                        Tone::Normal,
-                    )],
-                    surface: true,
-                }),
-        );
+        content.extend(track.plugins.iter().map(|plugin| Widget::Row {
+            children: vec![Widget::label(plugin.name, Tone::Normal)],
+            surface: true,
+        }));
     }
     if !track.pending_plugins.is_empty() {
         content.push(Widget::label("Adding plugin…", Tone::Muted));

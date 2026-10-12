@@ -13,7 +13,7 @@ pub use motown_bass::MotownBass;
 pub use reverb::Reverb;
 pub use tremolo::Tremolo;
 
-use tinex_core::plugin::Plugin;
+use tinex_core::plugin::{Plugin, PluginInstance};
 
 /// A named constructor for an available plugin.
 #[derive(Clone, Copy)]
@@ -30,8 +30,9 @@ impl PluginBuilder {
     /// Constructs a fresh plugin at the given sample rate.
     ///
     /// Panics if the sample rate is not finite and positive.
-    pub fn build(&self, sample_rate: f32) -> Box<dyn Plugin> {
-        (self.build)(sample_rate)
+    pub fn build(&self, sample_rate: f32) -> PluginInstance {
+        let plugin = (self.build)(sample_rate);
+        PluginInstance::new(plugin)
     }
 }
 

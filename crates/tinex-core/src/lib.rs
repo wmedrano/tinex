@@ -9,6 +9,7 @@ use wmidi::MidiMessage;
 
 use crate::{
     id::Id,
+    plugin::{PluginInstance, PluginInstanceId},
     track::{Track, TrackId},
 };
 
@@ -40,7 +41,7 @@ pub enum TinexRequest {
     NewTrack(Track),
     AddPlugin {
         track_id: TrackId,
-        plugin: Box<dyn plugin::Plugin>,
+        plugin: PluginInstance,
     },
     DeleteTrack(Id<Track>),
     /// Updates the supplied track entries with exponentially weighted block peak levels.
@@ -54,8 +55,7 @@ pub enum TinexNotification {
     TrackCreated(Id<Track>),
     TrackCreationFailed(Track),
     TrackDeleted(Track),
-    /// Confirms that a plugin was appended to this track's chain.
-    PluginAdded(TrackId),
+    PluginAdded(TrackId, PluginInstanceId),
     OutputLevel {
         output_level: f32,
         tracks: HashMap<TrackId, f32>,
@@ -108,10 +108,11 @@ impl Tinex {
                 TinexRequest::AddPlugin { track_id, plugin } => {
                     if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
                     {
-                        track.push_boxed_plugin(plugin);
+                        let plugin_id = plugin.id();
+                        track.push_plugin(plugin);
                         let _ = self
                             .notifications
-                            .send(TinexNotification::PluginAdded(track_id));
+                            .send(TinexNotification::PluginAdded(track_id, plugin_id));
                     }
                 }
                 TinexRequest::OutputLevel(mut tracks) => {

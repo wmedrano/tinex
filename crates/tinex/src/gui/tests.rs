@@ -1,8 +1,10 @@
 use super::dispatch::execute_effect;
+use super::state::UiPluginInstance;
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Mutex, mpsc};
+use tinex_core::plugin::{PluginInstance, PluginInstanceId};
 use tinex_core::track::Track;
 use tinex_core::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
 
@@ -79,10 +81,33 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
         );
     }
     assert!(state.tracks[0].plugins.is_empty());
-    assert_eq!(state.tracks[0].pending_plugins.len(), 3);
+    let pending: HashMap<PluginInstanceId, UiPluginInstance> =
+        state.tracks[0].pending_plugins.clone();
+    assert_eq!(pending.len(), 3);
     process(&mut engine);
     assert!(poll_notifications(&mut state, &receiver));
-    assert_eq!(state.tracks[0].plugins, ["EPiano", "Delay", "EPiano"]);
+    let confirmed = state.tracks[0].plugins.clone();
+    assert_eq!(
+        confirmed
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect::<Vec<_>>(),
+        ["EPiano", "Delay", "EPiano"]
+    );
+    // Every confirmed entry is the pending plugin whose id the engine echoed back.
+    assert!(confirmed.iter().all(|plugin| {
+        pending
+            .get(&plugin.id)
+            .is_some_and(|entry| entry.name == plugin.name)
+    }));
+    assert_eq!(
+        confirmed
+            .iter()
+            .map(|plugin| plugin.id)
+            .collect::<HashSet<_>>()
+            .len(),
+        3
+    );
     assert!(state.tracks[0].pending_plugins.is_empty());
     assert!(state.tracks[1].plugins.is_empty());
 
@@ -95,10 +120,7 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     let Widget::Column(content) = &**child else {
         panic!("expected column")
     };
-    for (row, expected) in content[3..]
-        .iter()
-        .zip(["1. EPiano", "2. Delay", "3. EPiano"])
-    {
+    for (row, expected) in content[3..].iter().zip(["EPiano", "Delay", "EPiano"]) {
         let Widget::Row { children, .. } = row else {
             panic!("expected plugin row")
         };
@@ -118,7 +140,7 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     );
     update::update(&mut state, Action::Disconnected);
     assert!(state.tracks[0].pending_plugins.is_empty());
-    assert_eq!(state.tracks[0].plugins, ["EPiano", "Delay", "EPiano"]);
+    assert_eq!(state.tracks[0].plugins, confirmed);
 }
 
 #[test]
@@ -321,7 +343,8 @@ fn weighted_peak_levels_above_unity_survive_the_engine_round_trip() {
     let TinexRequest::NewTrack(track) = &mut effect.request else {
         panic!("expected create");
     };
-    track.push_plugin(Loud);
+    let plugin = PluginInstance::new(Box::new(Loud));
+    track.push_plugin(plugin);
     assert!(execute_effect(&sender, effect).is_none());
     // Allow existing smoothing to rise above unity; do not mistake it for an
     // instantaneous/sample-accurate peak detector.
@@ -399,7 +422,8 @@ fn master_level_comes_from_the_mix_not_from_adding_track_meters() {
         let TinexRequest::NewTrack(track) = &mut effect.request else {
             panic!("expected create");
         };
-        track.push_plugin(Constant(value));
+        let plugin = PluginInstance::new(Box::new(Constant(value)));
+        track.push_plugin(plugin);
         assert!(execute_effect(&sender, effect).is_none());
     }
     for _ in 0..600 {
