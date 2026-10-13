@@ -542,3 +542,247 @@ fn narrow_layout_keeps_rectangles_nonnegative() {
         assert!(item.rect.height() >= 0.0);
     }
 }
+
+fn slider(id: WidgetId, value: f32, enabled: bool) -> Widget<f32> {
+    Widget::Slider(Slider {
+        id,
+        value,
+        min: -61.0,
+        max: 6.0,
+        step: 1.0,
+        width: 200.0,
+        enabled,
+        on_change: Arc::new(|value| value),
+    })
+}
+
+#[test]
+fn slider_dragging_clamps_quantizes_and_survives_view_rebuilds() {
+    let id = WidgetId::new();
+    let size = Size::new(300.0, 100.0);
+    let mut ui = Ui::new(slider(id, 0.0, true), size);
+    let rect = ui.items[0].rect;
+    let rail = inset(rect, 8.0);
+    ui.input(Input::PointerMoved(Point::new(rail.x0, rail.center().y)));
+    assert_eq!(ui.input(Input::PointerPressed), [-61.0]);
+    ui.set_view(slider(id, -61.0, true), size);
+    assert_eq!(ui.captured, Some(id));
+    assert_eq!(ui.focus, Some(id));
+    // Drag outside the original bounds while retaining capture.
+    assert_eq!(
+        ui.input(Input::PointerMoved(Point::new(
+            rect.x1 + 100.0,
+            rect.y1 + 100.0
+        ))),
+        [6.0]
+    );
+    assert!(
+        ui.input(Input::PointerMoved(Point::new(rect.x1 + 200.0, rect.y1)))
+            .is_empty()
+    );
+    assert_eq!(
+        ui.input(Input::PointerMoved(Point::new(
+            rail.center().x,
+            rail.center().y
+        ))),
+        [-27.0]
+    );
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    assert!(ui.captured.is_none());
+    assert!(
+        ui.input(Input::PointerMoved(Point::new(rail.x0, rail.y0)))
+            .is_empty()
+    );
+}
+
+#[test]
+fn slider_keyboard_focus_disabled_and_cancelled_gestures() {
+    let id = WidgetId::new();
+    let size = Size::new(300.0, 100.0);
+    let mut ui = Ui::new(slider(id, 0.0, true), size);
+    ui.input(Input::Tab { backwards: false });
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::Decrease)), [-1.0]);
+    ui.set_view(slider(id, -1.0, true), size);
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::Increase)), [0.0]);
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::Home)), [-61.0]);
+    assert!(ui.input(Input::Adjust(AdjustmentKey::Decrease)).is_empty());
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::Increase)), [-60.0]);
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::End)), [6.0]);
+    assert!(ui.input(Input::Adjust(AdjustmentKey::Increase)).is_empty());
+    ui.input(Input::PointerMoved(ui.items[0].rect.center()));
+    ui.input(Input::PointerPressed);
+    ui.set_view(slider(id, 6.0, false), size);
+    assert!(ui.captured.is_none() && ui.focus.is_none());
+    assert!(ui.input(Input::PointerPressed).is_empty());
+    assert!(ui.input(Input::Adjust(AdjustmentKey::Home)).is_empty());
+    ui.input(Input::Tab { backwards: false });
+    assert!(ui.focus.is_none());
+    ui.set_view(slider(id, 0.0, true), size);
+    ui.input(Input::PointerPressed);
+    ui.input(Input::Cancel);
+    assert!(ui.input(Input::PointerMoved(Point::ZERO)).is_empty());
+    ui.input(Input::Tab { backwards: false });
+    ui.set_view(Widget::Column(vec![]), size);
+    assert!(ui.focus.is_none() && ui.captured.is_none());
+}
+
+#[test]
+fn clipped_sliders_do_not_hit_and_tab_reveals_them_without_moving_footer() {
+    let id = WidgetId::new();
+    let scroll = WidgetId::new();
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        let mut content: Vec<_> = (0..20)
+            .map(|_| Widget::label("Row", Tone::Normal))
+            .collect();
+        content.push(slider(id, 0.0, true));
+        let mut ui = Ui::new(
+            Widget::Column(vec![
+                Widget::Scroll {
+                    id: scroll,
+                    child: Box::new(Widget::Column(content)),
+                },
+                Widget::StatusBar(vec![Widget::label("Ready", Tone::Normal)]),
+            ]),
+            size,
+        );
+        let footer = ui.items.last().unwrap().rect;
+        let position = ui
+            .items
+            .iter()
+            .find(|item| matches!(item.kind, ItemKind::Slider { .. }))
+            .unwrap()
+            .rect
+            .center();
+        ui.input(Input::PointerMoved(position));
+        assert!(ui.input(Input::PointerPressed).is_empty());
+        assert!(ui.captured.is_none());
+        ui.input(Input::Tab { backwards: false });
+        let item = ui
+            .items
+            .iter()
+            .find(|item| matches!(item.kind, ItemKind::Slider { .. }))
+            .unwrap();
+        assert!(item.clip.contains(item.rect.center()));
+        assert_eq!(ui.focus, Some(id));
+        assert_eq!(ui.items.last().unwrap().rect, footer);
+        ui.input(Input::PointerMoved(item.rect.center()));
+        ui.input(Input::PointerPressed);
+        ui.input(Input::Scroll(-1000.0));
+        assert!(ui.captured.is_none());
+    }
+}
+
+fn meter_slider(id: WidgetId, value: f32, level: f32, enabled: bool) -> Widget<f32> {
+    let Widget::Slider(slider) = slider(id, value, enabled) else {
+        unreachable!()
+    };
+    Widget::MeterSlider {
+        slider,
+        meter: LevelMeter::new(level),
+        readout: format!("{value:+.0} dB"),
+    }
+}
+
+#[test]
+fn meter_slider_preserves_capture_focus_and_nested_control_precedence() {
+    let id = WidgetId::new();
+    let row_id = WidgetId::new();
+    let size = Size::new(400.0, 200.0);
+    let make_view = |value, level, enabled| {
+        Widget::clickable_row(
+            row_id,
+            vec![meter_slider(id, value, level, enabled)],
+            true,
+            100.0,
+        )
+    };
+    let mut ui = Ui::new(make_view(0.0, 1.0, true), size);
+    let rect = ui.items[1].rect;
+    let rail = inset(slider_rail(rect, true), 8.0);
+    ui.input(Input::PointerMoved(Point::new(rail.x0, rail.center().y)));
+    assert_eq!(ui.input(Input::PointerPressed), [-61.0]);
+    ui.set_view(make_view(-61.0, 2.0, true), size);
+    assert_eq!(ui.focus, Some(id));
+    assert_eq!(ui.captured, Some(id));
+    assert_eq!(
+        ui.input(Input::PointerMoved(Point::new(rail.x1, rail.center().y))),
+        [6.0]
+    );
+    // Releasing outside the nested control cannot activate the parent row.
+    ui.input(Input::PointerMoved(Point::new(
+        rect.x1 + 20.0,
+        rect.center().y,
+    )));
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    ui.set_view(make_view(6.0, 0.0, false), size);
+    ui.input(Input::PointerMoved(rect.center()));
+    assert!(ui.input(Input::PointerPressed).is_empty());
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    ui.set_view(make_view(0.0, 1.0, true), size);
+    ui.input(Input::Cancel);
+    ui.input(Input::Tab { backwards: false }); // Row.
+    ui.input(Input::Tab { backwards: false }); // Combined control.
+    assert_eq!(ui.input(Input::Adjust(AdjustmentKey::Decrease)), [-1.0]);
+}
+
+#[test]
+fn combined_controls_obey_clipping_and_keep_the_footer_fixed() {
+    let scroll = WidgetId::new();
+    let ids: Vec<_> = (0..10).map(|_| WidgetId::new()).collect();
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0), Size::ZERO] {
+        for count in [0, 10] {
+            let make_view = |level| {
+                Widget::Column(vec![
+                    Widget::Scroll {
+                        id: scroll,
+                        child: Box::new(Widget::Column(
+                            ids.iter()
+                                .take(count)
+                                .map(|id| meter_slider(*id, 0.0, level, true))
+                                .collect(),
+                        )),
+                    },
+                    Widget::StatusBar(vec![Widget::label("Ready", Tone::Muted)]),
+                ])
+            };
+            let mut ui = Ui::new(make_view(1.0), size);
+            let footer = ui
+                .items
+                .iter()
+                .find(|item| matches!(item.kind, ItemKind::StatusSurface))
+                .unwrap()
+                .rect;
+            for item in &ui.items {
+                assert!(item.rect.width() >= 0.0 && item.rect.height() >= 0.0);
+                if matches!(item.kind, ItemKind::Slider { .. }) {
+                    assert!(item.clip.y1 <= footer.y0);
+                }
+            }
+            if count > 0 && size.height > 0.0 {
+                let last = ui
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|item| matches!(item.kind, ItemKind::Slider { .. }))
+                    .unwrap();
+                ui.input(Input::PointerMoved(last.rect.center()));
+                assert!(ui.input(Input::PointerPressed).is_empty());
+                assert!(ui.captured.is_none());
+                ui.input(Input::PointerMoved(ui.regions[0].rect.center()));
+                ui.input(Input::Scroll(10000.0));
+                assert!(ui.offsets[&scroll] > 0.0);
+                ui.input(Input::Tab { backwards: true });
+                assert_eq!(ui.focus, Some(ids[count - 1]));
+            }
+            ui.set_view(make_view(2.0), size);
+            assert_eq!(
+                ui.items
+                    .iter()
+                    .find(|item| matches!(item.kind, ItemKind::StatusSurface))
+                    .unwrap()
+                    .rect,
+                footer
+            );
+        }
+    }
+}

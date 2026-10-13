@@ -16,7 +16,7 @@ use meter_polling::MeterPolling;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use theme::Theme;
-use tinex_widgets::{ActivationKey, Input, TextRenderer, Ui};
+use tinex_widgets::{ActivationKey, AdjustmentKey, Input, TextRenderer, Ui};
 use vello::Scene;
 use vello::kurbo::{Point, Size};
 use winit::application::ApplicationHandler;
@@ -312,6 +312,22 @@ impl ApplicationHandler for App {
                         self.input(Input::Tab {
                             backwards: self.shift,
                         })
+                    }
+                    Key::Named(
+                        key @ (NamedKey::ArrowLeft
+                        | NamedKey::ArrowDown
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::Home
+                        | NamedKey::End),
+                    ) if event.state == ElementState::Pressed => {
+                        self.input(Input::Adjust(match key {
+                            NamedKey::ArrowLeft | NamedKey::ArrowDown => AdjustmentKey::Decrease,
+                            NamedKey::ArrowRight | NamedKey::ArrowUp => AdjustmentKey::Increase,
+                            NamedKey::Home => AdjustmentKey::Home,
+                            NamedKey::End => AdjustmentKey::End,
+                            _ => unreachable!(),
+                        }));
                     }
                     Key::Named(NamedKey::Enter) => self.input(Input::Key {
                         key: ActivationKey::Enter,

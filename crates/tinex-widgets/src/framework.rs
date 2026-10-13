@@ -1,6 +1,7 @@
 //! Declarative widgets with retained interaction state and queued application actions.
 //! Layout, drawing, and hit testing share logical-coordinate geometry.
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vello::Scene;
@@ -33,9 +34,49 @@ pub enum Tone {
     Error,
 }
 
+/// A discrete horizontal slider. Bounds and step must be finite, with min < max
+/// and step > 0. Values and pointer positions are clamped and rounded to the step.
+#[derive(Clone)]
+pub struct Slider<A> {
+    pub id: WidgetId,
+    pub value: f32,
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+    pub width: f64,
+    pub enabled: bool,
+    pub on_change: Arc<dyn Fn(f32) -> A>,
+}
+
+impl<A> Slider<A> {
+    fn quantize(&self, value: f32) -> f32 {
+        if !value.is_finite() {
+            return self.min;
+        }
+        (self.min + ((value.clamp(self.min, self.max) - self.min) / self.step).round() * self.step)
+            .clamp(self.min, self.max)
+    }
+
+    fn valid(&self) -> bool {
+        self.min.is_finite()
+            && self.max.is_finite()
+            && self.min < self.max
+            && self.step.is_finite()
+            && self.step > 0.0
+    }
+}
+
 /// The initial layout vocabulary: fixed-size buttons, fixed or flexible labels, rows,
 /// clickable rows, columns, and vertical scroll regions. No application/engine dependencies.
 pub enum Widget<A> {
+    Slider(Slider<A>),
+    /// Live dBFS meter behind a gain slider, with a readout below the rail.
+    /// The meter shares the slider's dB range and uses its existing color zones.
+    MeterSlider {
+        slider: Slider<A>,
+        meter: LevelMeter,
+        readout: String,
+    },
     Button {
         id: WidgetId,
         label: String,
@@ -67,7 +108,7 @@ pub enum Widget<A> {
         children: Vec<Self>,
         surface: bool,
     },
-    /// A focusable row surface. Nested buttons take precedence over its action,
+    /// A focusable row surface. Nested controls take precedence over its action,
     /// including disabled buttons, which block activation in their own bounds.
     ClickableRow {
         id: WidgetId,
@@ -151,7 +192,8 @@ impl<A> Widget<A> {
 
     fn height(&self) -> f64 {
         match self {
-            Self::Button { .. } => 36.0,
+            Self::Button { .. } | Self::Slider(_) => 36.0,
+            Self::MeterSlider { .. } => 60.0,
             Self::Label { .. } => 28.0,
             Self::LevelMeter { .. } => LevelMeter::HEIGHT,
             Self::CompactLevelMeter { .. } | Self::PercentageMeter { .. } => 28.0,
@@ -169,6 +211,7 @@ impl<A> Widget<A> {
 
     fn fixed_width(&self) -> Option<f64> {
         match self {
+            Self::Slider(slider) | Self::MeterSlider { slider, .. } => Some(slider.width),
             Self::Button { width, .. }
             | Self::LevelMeter { width, .. }
             | Self::CompactLevelMeter { width, .. }
@@ -198,7 +241,16 @@ pub enum ActivationKey {
     Space,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum AdjustmentKey {
+    Decrease,
+    Increase,
+    Home,
+    End,
+}
+
 pub enum Input {
+    Adjust(AdjustmentKey),
     PointerMoved(Point),
     PointerLeft,
     PointerPressed,
@@ -223,6 +275,11 @@ struct Item<A> {
 }
 
 enum ItemKind<A> {
+    Slider {
+        slider: Slider<A>,
+        meter: Option<LevelMeter>,
+        readout: Option<String>,
+    },
     Surface,
     StatusSurface,
     PercentageMeter(f64),
@@ -332,19 +389,28 @@ impl<A: Clone> Ui<A> {
     }
 
     fn enabled(&self, id: WidgetId) -> bool {
-        self.items.iter().any(|item| matches!(&item.kind, ItemKind::Button { id: found, enabled: true, .. } if *found == id))
+        self.items.iter().any(|item| match &item.kind {
+            ItemKind::Button {
+                id: found,
+                enabled: true,
+                ..
+            } => *found == id,
+            ItemKind::Slider { slider, .. } => slider.id == id && slider.enabled && slider.valid(),
+            _ => false,
+        })
     }
 
     fn hit(&self, point: Point) -> Option<WidgetId> {
         let item = self.items.iter().rev().find(|item| {
-            matches!(item.kind, ItemKind::Button { .. })
+            matches!(item.kind, ItemKind::Button { .. } | ItemKind::Slider { .. })
                 && item.rect.contains(point)
                 && item.clip.contains(point)
         })?;
-        match item.kind {
+        match &item.kind {
+            ItemKind::Slider { slider, .. } if slider.enabled && slider.valid() => Some(slider.id),
             ItemKind::Button {
                 id, enabled: true, ..
-            } => Some(id),
+            } => Some(*id),
             _ => None,
         }
     }
@@ -361,12 +427,51 @@ impl<A: Clone> Ui<A> {
         })
     }
 
+    fn change_slider(&mut self, id: WidgetId, value: f32) -> Option<A> {
+        let slider = self
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.kind {
+                ItemKind::Slider { slider, .. }
+                    if slider.id == id && slider.enabled && slider.valid() =>
+                {
+                    Some(slider)
+                }
+                _ => None,
+            })?;
+        let value = slider.quantize(value);
+        if value == slider.quantize(slider.value) {
+            return None;
+        }
+        slider.value = value;
+        Some((slider.on_change)(value))
+    }
+
+    fn drag_slider(&mut self, id: WidgetId, point: Point) -> Option<A> {
+        let (rect, min, max) = self.items.iter().find_map(|item| match &item.kind {
+            ItemKind::Slider { slider, .. } if slider.id == id => {
+                Some((inset(item.rect, 8.0), slider.min, slider.max))
+            }
+            _ => None,
+        })?;
+        if rect.width() <= 0.0 {
+            return None;
+        }
+        let fraction = ((point.x - rect.x0) / rect.width()).clamp(0.0, 1.0) as f32;
+        self.change_slider(id, min + fraction * (max - min))
+    }
+
     pub fn input(&mut self, input: Input) -> Vec<A> {
         let mut actions = Vec::new();
         match input {
             Input::PointerMoved(point) => {
                 self.pointer = Some(point);
                 self.hovered = self.hit(point);
+                if let Some(id) = self.captured
+                    && let Some(action) = self.drag_slider(id, point)
+                {
+                    actions.push(action);
+                }
             }
             Input::PointerLeft => {
                 self.pointer = None;
@@ -376,6 +481,11 @@ impl<A: Clone> Ui<A> {
                 self.captured = self.hovered;
                 self.focus = self.hovered;
                 self.key_pressed = None;
+                if let (Some(id), Some(point)) = (self.captured, self.pointer)
+                    && let Some(action) = self.drag_slider(id, point)
+                {
+                    actions.push(action);
+                }
             }
             Input::PointerReleased => {
                 if let Some(id) = self.captured.take()
@@ -410,6 +520,9 @@ impl<A: Clone> Ui<A> {
                         ItemKind::Button {
                             id, enabled: true, ..
                         } => Some(id),
+                        ItemKind::Slider { ref slider, .. } if slider.enabled && slider.valid() => {
+                            Some(slider.id)
+                        }
                         _ => None,
                     })
                     .collect();
@@ -425,6 +538,24 @@ impl<A: Clone> Ui<A> {
                     };
                     self.focus = Some(ids[next]);
                     self.reveal_focus();
+                }
+            }
+            Input::Adjust(key) => {
+                if let Some(id) = self.focus {
+                    let value = self.items.iter().find_map(|item| match &item.kind {
+                        ItemKind::Slider { slider, .. } if slider.id == id => Some(match key {
+                            AdjustmentKey::Decrease => slider.value - slider.step,
+                            AdjustmentKey::Increase => slider.value + slider.step,
+                            AdjustmentKey::Home => slider.min,
+                            AdjustmentKey::End => slider.max,
+                        }),
+                        _ => None,
+                    });
+                    if let Some(value) = value
+                        && let Some(action) = self.change_slider(id, value)
+                    {
+                        actions.push(action);
+                    }
                 }
             }
             Input::Key {
@@ -458,9 +589,11 @@ impl<A: Clone> Ui<A> {
     }
 
     fn reveal_focus(&mut self) {
-        let Some(item) = self.items.iter().find(
-            |item| matches!(item.kind, ItemKind::Button { id, .. } if Some(id) == self.focus),
-        ) else {
+        let Some(item) = self.items.iter().find(|item| match &item.kind {
+            ItemKind::Button { id, .. } => Some(*id) == self.focus,
+            ItemKind::Slider { slider, .. } => Some(slider.id) == self.focus,
+            _ => false,
+        }) else {
             return;
         };
         let Some(region) = self
@@ -496,6 +629,89 @@ impl<A: Clone> Ui<A> {
             }
             scene.push_clip_layer(Fill::NonZero, transform, &item.clip);
             match &item.kind {
+                ItemKind::Slider {
+                    slider,
+                    meter,
+                    readout,
+                } => {
+                    if !slider.valid() {
+                        scene.pop_layer();
+                        continue;
+                    }
+                    let rail_rect = slider_rail(item.rect, meter.is_some());
+                    let inner = inset(rail_rect, 8.0);
+                    let fraction = f64::from(
+                        (slider.quantize(slider.value) - slider.min) / (slider.max - slider.min),
+                    );
+                    let y = inner.center().y;
+                    let rail = Rect::new(inner.x0, y - 2.0, inner.x1, y + 2.0);
+                    if let Some(meter) = meter {
+                        meter.render_with_range(
+                            scene,
+                            inner,
+                            scale,
+                            &style.meter,
+                            f64::from(slider.min),
+                            f64::from(slider.max),
+                        );
+                    } else {
+                        scene.fill(Fill::NonZero, transform, style.meter.trough, None, &rail);
+                    }
+                    let x = inner.x0 + fraction * inner.width();
+                    let color = if !slider.enabled {
+                        style.disabled
+                    } else if self.captured == Some(slider.id) {
+                        style.pressed
+                    } else if self.hovered == Some(slider.id) {
+                        style.hovered
+                    } else {
+                        style.button
+                    };
+                    scene.fill(
+                        Fill::NonZero,
+                        transform,
+                        color,
+                        None,
+                        &Rect::new(x - 6.0, y - 10.0, x + 6.0, y + 10.0).to_rounded_rect(3.0),
+                    );
+                    if meter.is_some() {
+                        scene.stroke(
+                            &Stroke::new(1.0),
+                            transform,
+                            if slider.enabled {
+                                style.text
+                            } else {
+                                style.muted
+                            },
+                            None,
+                            &Rect::new(x - 6.0, y - 10.0, x + 6.0, y + 10.0).to_rounded_rect(3.0),
+                        );
+                    }
+                    if let Some(readout) = readout {
+                        scene.push_clip_layer(Fill::NonZero, transform, &item.rect);
+                        text.draw(
+                            scene,
+                            readout,
+                            Point::new(item.rect.x0 + 8.0, rail_rect.y1),
+                            scale,
+                            if slider.enabled {
+                                style.text
+                            } else {
+                                style.muted
+                            },
+                        );
+                        scene.pop_layer();
+                    }
+                    if self.focus == Some(slider.id) {
+                        scene.stroke(
+                            &Stroke::new(2.0),
+                            transform,
+                            style.focus,
+                            None,
+                            &inset(item.rect, 2.0).to_rounded_rect(4.0),
+                        );
+                    }
+                }
                 ItemKind::Surface => scene.fill(
                     Fill::NonZero,
                     transform,
@@ -622,6 +838,14 @@ impl<A: Clone> Ui<A> {
     }
 }
 
+fn slider_rail(rect: Rect, combined: bool) -> Rect {
+    if combined {
+        Rect::new(rect.x0, rect.y0, rect.x1, (rect.y0 + 36.0).min(rect.y1))
+    } else {
+        rect
+    }
+}
+
 fn inset(rect: Rect, padding: f64) -> Rect {
     let x = padding.min(rect.width().max(0.0) / 2.0);
     let y = padding.min(rect.height().max(0.0) / 2.0);
@@ -638,6 +862,30 @@ fn layout<A: Clone>(
     offsets: &mut HashMap<WidgetId, f64>,
 ) {
     match node {
+        Widget::Slider(slider) => items.push(Item {
+            rect,
+            clip,
+            scroll,
+            kind: ItemKind::Slider {
+                slider: slider.clone(),
+                meter: None,
+                readout: None,
+            },
+        }),
+        Widget::MeterSlider {
+            slider,
+            meter,
+            readout,
+        } => items.push(Item {
+            rect,
+            clip,
+            scroll,
+            kind: ItemKind::Slider {
+                slider: slider.clone(),
+                meter: Some(*meter),
+                readout: Some(readout.clone()),
+            },
+        }),
         Widget::Button {
             id,
             label,

@@ -18,6 +18,35 @@ pub(super) struct Update {
 pub(super) fn update(state: &mut AppState, action: Action) -> Update {
     let mut result = Update::default();
     match action {
+        Action::Ui(UiAction::SetTrackVolume { track_id, db })
+            if state.connected && db.is_finite() =>
+        {
+            if let Some(track) = state
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id && !track.deleting)
+            {
+                let db = db.clamp(-61.0, 12.0).round();
+                if track.volume_db != db {
+                    let previous_db = track.volume_db;
+                    track.volume_db = db;
+                    let gain = if db == -61.0 {
+                        0.0
+                    } else {
+                        10.0_f32.powf(db / 20.0)
+                    };
+                    result.effects.push(Effect {
+                        request: TinexRequest::SetTrackVolume(track_id, gain),
+                        operation: Operation::SetTrackVolume {
+                            track_id,
+                            previous_db,
+                        },
+                    });
+                    state.message = None;
+                    result.changed = true;
+                }
+            }
+        }
         Action::CpuLoad(load) => {
             let load = (state.connected && load.is_finite() && load >= 0.0)
                 .then(|| (load.min(100.0) * 10.0).round() / 10.0);
@@ -145,6 +174,8 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     row: WidgetId::new(),
                     open_button: WidgetId::new(),
                     delete_button: WidgetId::new(),
+                    volume_slider: WidgetId::new(),
+                    volume_db: 0.0,
                     deleting: false,
                     plugins: Vec::new(),
                     pending_plugins: Default::default(),
@@ -183,6 +214,15 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
         }
         Action::RequestFailed(operation) => {
             match operation {
+                Operation::SetTrackVolume {
+                    track_id,
+                    previous_db,
+                } => {
+                    if let Some(track) = state.tracks.iter_mut().find(|track| track.id == track_id)
+                    {
+                        track.volume_db = previous_db;
+                    }
+                }
                 Operation::Create(id) => {
                     state.pending.remove(&id);
                 }

@@ -28,7 +28,7 @@ pub(super) fn main_view(state: &AppState) -> Vec<Widget<UiAction>> {
                     track.row,
                     vec![
                         Widget::label(&track.name, Tone::Normal),
-                        Widget::level_meter(track.output_level, 144.0),
+                        super::track_volume_control(state, track, 144.0),
                         Widget::button(
                             track.open_button,
                             "Open",

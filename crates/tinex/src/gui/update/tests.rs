@@ -262,3 +262,106 @@ fn failed_send_clears_all_pending_operations_without_removing_confirmed_rows() {
     assert_eq!(state.tracks[0].name, "Track 1");
     assert!(!state.connected);
 }
+
+#[test]
+fn volume_changes_use_linear_gain_and_affect_only_the_requested_track() {
+    let mut state = AppState::default();
+    let first = create(&mut state);
+    let second = create(&mut state);
+    confirm(&mut state, first.id());
+    confirm(&mut state, second.id());
+    assert_eq!(state.tracks[0].volume_db, 0.0);
+    let slider_id = state.tracks[0].volume_slider;
+    for (db, gain) in [
+        (-61.0, 0.0),
+        (-60.0, 0.001),
+        (-6.0, 10.0_f32.powf(-0.3)),
+        (0.0, 1.0),
+        (6.0, 10.0_f32.powf(0.3)),
+        (12.0, 10.0_f32.powf(0.6)),
+    ] {
+        let result = update(
+            &mut state,
+            Action::Ui(UiAction::SetTrackVolume {
+                track_id: first.id(),
+                db,
+            }),
+        );
+        assert!(result.changed);
+        assert!(
+            matches!(result.effects.as_slice(), [Effect { request: TinexRequest::SetTrackVolume(id, value), .. }]
+            if *id == first.id() && (*value - gain).abs() < 1e-6)
+        );
+        assert_eq!(state.tracks[0].volume_db, db);
+        assert_eq!(state.tracks[0].volume_slider, slider_id);
+        assert_eq!(state.tracks[1].volume_db, 0.0);
+        let repeated = update(
+            &mut state,
+            Action::Ui(UiAction::SetTrackVolume {
+                track_id: first.id(),
+                db,
+            }),
+        );
+        assert!(!repeated.changed && repeated.effects.is_empty());
+    }
+}
+
+#[test]
+fn volume_rejects_invalid_unavailable_tracks_and_restores_failed_changes() {
+    let mut state = AppState::default();
+    let track = create(&mut state);
+    let action = |track_id, db| Action::Ui(UiAction::SetTrackVolume { track_id, db });
+    assert!(
+        update(&mut state, action(track.id(), -6.0))
+            .effects
+            .is_empty()
+    );
+    confirm(&mut state, track.id());
+    for (id, db) in [
+        (TrackId::new(), -6.0),
+        (track.id(), f32::NAN),
+        (track.id(), f32::INFINITY),
+        (track.id(), f32::NEG_INFINITY),
+    ] {
+        let result = update(&mut state, action(id, db));
+        assert!(!result.changed && result.effects.is_empty());
+    }
+    state.tracks[0].deleting = true;
+    assert!(
+        update(&mut state, action(track.id(), -6.0))
+            .effects
+            .is_empty()
+    );
+    state.tracks[0].deleting = false;
+    let effect = update(&mut state, action(track.id(), -6.0))
+        .effects
+        .remove(0);
+    assert_eq!(state.tracks[0].volume_db, -6.0);
+    update(&mut state, Action::RequestFailed(effect.operation));
+    assert_eq!(state.tracks[0].volume_db, 0.0);
+    assert!(!state.connected);
+    assert!(
+        update(&mut state, action(track.id(), -6.0))
+            .effects
+            .is_empty()
+    );
+}
+
+#[test]
+fn volume_above_twelve_db_is_clamped_to_the_new_limit() {
+    let mut state = AppState::default();
+    let track = create(&mut state);
+    confirm(&mut state, track.id());
+    let result = update(
+        &mut state,
+        Action::Ui(UiAction::SetTrackVolume {
+            track_id: track.id(),
+            db: 24.0,
+        }),
+    );
+    assert_eq!(state.tracks[0].volume_db, 12.0);
+    assert!(
+        matches!(result.effects.as_slice(), [Effect { request: TinexRequest::SetTrackVolume(id, gain), .. }]
+        if *id == track.id() && (*gain - 10.0_f32.powf(0.6)).abs() < 1e-6)
+    );
+}

@@ -10,6 +10,9 @@ pub(super) struct UiTrack {
     pub row: WidgetId,
     pub open_button: WidgetId,
     pub delete_button: WidgetId,
+    pub volume_slider: WidgetId,
+    /// Requested dB setting; -61 represents silence.
+    pub volume_db: f32,
     pub deleting: bool,
     /// Confirmed plugins in audio-chain order (including duplicates), each carrying
     /// the id the engine uses to address it.

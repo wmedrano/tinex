@@ -269,12 +269,8 @@ fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
     state.tracks[0].output_level = 2.0;
     ui.set_view(view(&state), size);
 
-    for point in [
-        Point::new(36.0, 100.0),
-        Point::new(150.0, 100.0),
-        Point::new(230.0, 100.0),
-    ] {
-        let actions = click(&mut ui, point); // Name, meter, or Open button.
+    for point in [Point::new(20.0, 100.0), Point::new(230.0, 100.0)] {
+        let actions = click(&mut ui, point); // Track row or Open button.
         assert!(matches!(actions.as_slice(), [UiAction::OpenTrack(id)] if *id == track.id()));
         let result = update(&mut state, Action::Ui(actions[0]));
         assert!(result.changed && result.effects.is_empty());
@@ -306,7 +302,7 @@ fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
         else {
             panic!("expected output row");
         };
-        assert!(matches!(&output[1], Widget::LevelMeter { meter, .. } if meter.amplitude == 2.0));
+        assert!(matches!(&output[1], Widget::MeterSlider { meter, .. } if meter.amplitude == 2.0));
         let Widget::StatusBar(footer) = &children[2] else {
             panic!("expected footer");
         };
@@ -341,6 +337,7 @@ fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
     ui.input(Input::Cancel);
     ui.input(Input::Tab { backwards: false }); // Create.
     ui.input(Input::Tab { backwards: false }); // Track row.
+    ui.input(Input::Tab { backwards: false }); // Volume.
     ui.input(Input::Tab { backwards: false }); // Open button.
     ui.input(Input::Key {
         key: ActivationKey::Enter,
@@ -385,7 +382,7 @@ fn add_plugin_picker_supports_pointer_keyboard_and_back_navigation() {
     update(&mut state, Action::Ui(UiAction::OpenTrack(id)));
     let size = Size::new(400.0, 280.0);
     let mut ui = Ui::new(view(&state), size);
-    ui.input(Input::PointerMoved(Point::new(80.0, 166.0)));
+    ui.input(Input::PointerMoved(Point::new(80.0, 186.0)));
     ui.input(Input::PointerPressed);
     let actions = ui.input(Input::PointerReleased);
     assert!(matches!(actions.as_slice(), [UiAction::OpenPlugins(track_id)] if *track_id == id));
@@ -527,4 +524,245 @@ fn initial_view_draws_bundled_labels() {
             .iter()
             .all(|glyph| glyph.id != 0)
     );
+}
+
+#[test]
+fn track_volume_fader_supports_keyboard_and_pointer_at_multiple_sizes_and_scales() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    use tinex_widgets::{AdjustmentKey, Input, Ui};
+    use vello::kurbo::Point;
+    let mut state = AppState::default();
+    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
+        .effects
+        .remove(0);
+    let TinexRequest::NewTrack(track) = effect.request else {
+        panic!("expected track");
+    };
+    let id = track.id();
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::TrackCreated(id)),
+    );
+    state.page = Page::Track(id);
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        state.tracks[0].volume_db = 0.0;
+        let mut ui = Ui::new(view(&state), size);
+        ui.input(Input::Tab { backwards: false }); // Back.
+        ui.input(Input::Tab { backwards: false }); // Volume.
+        let actions = ui.input(Input::Adjust(AdjustmentKey::Decrease));
+        assert!(
+            matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: -1.0 }] if *track_id == id)
+        );
+        update(&mut state, Action::Ui(actions[0]));
+        ui.set_view(view(&state), size);
+        let actions = ui.input(Input::Adjust(AdjustmentKey::Home));
+        update(&mut state, Action::Ui(actions[0]));
+        ui.set_view(view(&state), size);
+        let Widget::Column(page) = view(&state) else {
+            panic!("expected page");
+        };
+        let Widget::Scroll { child, .. } = &page[1] else {
+            panic!("expected scroll");
+        };
+        let Widget::Column(content) = &**child else {
+            panic!("expected content");
+        };
+        let Widget::Row { children, .. } = &content[0] else {
+            panic!("expected volume row");
+        };
+        assert!(
+            matches!(&children[1], Widget::MeterSlider { readout, meter, .. } if readout == "−∞ dB" && meter.amplitude == 0.0)
+        );
+        for scale in [1.0, 2.0] {
+            let mut scene = Scene::new();
+            ui.render(
+                &mut scene,
+                &mut TextRenderer::new(),
+                &Theme::default().widgets,
+                scale,
+            );
+            assert!(!scene.encoding().resources.glyph_runs.is_empty());
+            // Model the event loop's physical-to-logical pointer conversion.
+            let physical = Point::new((size.width - 220.0) * scale, 102.0 * scale);
+            ui.input(Input::PointerMoved(Point::new(
+                physical.x / scale,
+                physical.y / scale,
+            )));
+            let actions = ui.input(Input::PointerPressed);
+            assert!(
+                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, .. }] if *track_id == id)
+            );
+            ui.input(Input::PointerReleased);
+            // Restore silence for the next pointer interaction.
+            ui.set_view(view(&state), size);
+        }
+        state.tracks[0].deleting = true;
+        ui.set_view(view(&state), size);
+        assert!(ui.input(Input::Adjust(AdjustmentKey::End)).is_empty());
+        ui.input(Input::PointerPressed);
+        assert!(ui.input(Input::PointerReleased).is_empty());
+        state.tracks[0].deleting = false;
+    }
+    update(&mut state, Action::Disconnected);
+    let mut ui = Ui::new(view(&state), Size::new(400.0, 280.0));
+    ui.input(Input::Tab { backwards: false });
+    ui.input(Input::Tab { backwards: false }); // Only Back remains focusable.
+    assert!(ui.input(Input::Adjust(AdjustmentKey::End)).is_empty());
+}
+
+#[test]
+fn combined_meter_displays_post_gain_on_both_pages_and_preserves_stable_ids() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    let mut state = AppState::default();
+    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
+        .effects
+        .remove(0);
+    let TinexRequest::NewTrack(track) = effect.request else {
+        panic!("expected track");
+    };
+    let id = track.id();
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::TrackCreated(id)),
+    );
+    let slider_id = state.tracks[0].volume_slider;
+    for (db, level, expected) in [
+        (-61.0, f32::INFINITY, 0.0),
+        (-60.0, 1.0, 0.001),
+        (-6.0, 1.0, 10.0_f32.powf(-0.3)),
+        (0.0, 1.0, 1.0),
+        (6.0, 1.0, 10.0_f32.powf(0.3)),
+        (12.0, 1.0, 10.0_f32.powf(0.6)),
+        (0.0, f32::NAN, 0.0),
+        (0.0, -1.0, 0.0),
+        (0.0, f32::INFINITY, f32::INFINITY),
+    ] {
+        state.tracks[0].volume_db = db;
+        state.tracks[0].output_level = level;
+        for (page, width) in [(Page::Main, 144.0), (Page::Track(id), 240.0)] {
+            state.page = page;
+            let Widget::Column(page) = view(&state) else {
+                panic!("expected page");
+            };
+            let Widget::Scroll { child, .. } = &page[1] else {
+                panic!("expected scroll");
+            };
+            let Widget::Column(content) = &**child else {
+                panic!("expected column");
+            };
+            let children = match &content[0] {
+                Widget::Row { children, .. } | Widget::ClickableRow { children, .. } => children,
+                _ => panic!("expected row"),
+            };
+            let Widget::MeterSlider {
+                slider,
+                meter,
+                readout,
+            } = &children[1]
+            else {
+                panic!("expected combined control");
+            };
+            assert_eq!(slider.id, slider_id);
+            assert_eq!(slider.value, db);
+            assert_eq!(slider.width, width);
+            assert_eq!(slider.max, 12.0);
+            assert_eq!(meter.amplitude, expected);
+            assert_eq!(
+                readout,
+                &if db == -61.0 {
+                    "−∞ dB".into()
+                } else {
+                    format!("{db:+.0} dB")
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn main_page_volume_controls_target_each_track_and_never_navigate() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    use tinex_widgets::{AdjustmentKey, Input, Ui};
+    use vello::kurbo::Point;
+    let mut state = AppState::default();
+    for _ in 0..2 {
+        let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
+            .effects
+            .remove(0);
+        let TinexRequest::NewTrack(track) = effect.request else {
+            panic!("expected track");
+        };
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::TrackCreated(track.id())),
+        );
+    }
+    let first = state.tracks[0].id;
+    let second = state.tracks[1].id;
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        for scale in [1.0, 2.0] {
+            state.tracks[0].volume_db = 0.0;
+            state.tracks[1].volume_db = 0.0;
+            let mut ui = Ui::new(view(&state), size);
+            for _ in 0..3 {
+                ui.input(Input::Tab { backwards: false });
+            } // Create, row, volume.
+            let actions = ui.input(Input::Adjust(AdjustmentKey::Increase));
+            assert!(
+                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: 1.0 }] if *track_id == first)
+            );
+            update(&mut state, Action::Ui(actions[0]));
+            assert_eq!(state.page, Page::Main);
+            assert_eq!(state.tracks[1].volume_db, 0.0);
+            ui.set_view(view(&state), size);
+            let physical = Point::new((size.width - 296.0) * scale, 186.0 * scale);
+            ui.input(Input::PointerMoved(Point::new(
+                physical.x / scale,
+                physical.y / scale,
+            )));
+            let actions = ui.input(Input::PointerPressed);
+            assert!(
+                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, .. }] if *track_id == second)
+            );
+            let result = update(&mut state, Action::Ui(actions[0]));
+            assert!(
+                matches!(&result.effects[0].request, TinexRequest::SetTrackVolume(id, _) if *id == second)
+            );
+            assert_eq!(state.page, Page::Main);
+            update(
+                &mut state,
+                Action::Notification(TinexNotification::OutputLevel {
+                    output_level: 0.5,
+                    tracks: [(first, 0.25), (second, 0.5)].into(),
+                }),
+            );
+            ui.set_view(view(&state), size);
+            // Capture stays on the second track even when dragging over the first.
+            let actions = ui.input(Input::PointerMoved(Point::new(size.width, 102.0)));
+            assert!(
+                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: 12.0 }] if *track_id == second)
+            );
+            update(&mut state, Action::Ui(actions[0]));
+            assert!(ui.input(Input::PointerReleased).is_empty());
+            assert_eq!(state.tracks[0].volume_db, 1.0);
+            assert_eq!(state.tracks[1].volume_db, 12.0);
+            assert_eq!(state.page, Page::Main);
+            state.tracks[1].deleting = true;
+            ui.set_view(view(&state), size);
+            ui.input(Input::PointerMoved(Point::new(size.width - 296.0, 186.0)));
+            assert!(ui.input(Input::PointerPressed).is_empty());
+            assert!(ui.input(Input::PointerReleased).is_empty());
+            assert_eq!(state.page, Page::Main);
+            state.tracks[1].deleting = false;
+        }
+    }
+    update(&mut state, Action::Disconnected);
+    let mut ui = Ui::new(view(&state), Size::new(400.0, 280.0));
+    ui.input(Input::PointerMoved(Point::new(104.0, 102.0)));
+    assert!(ui.input(Input::PointerPressed).is_empty());
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    assert_eq!(state.page, Page::Main);
 }

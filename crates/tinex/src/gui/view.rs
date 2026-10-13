@@ -1,8 +1,9 @@
 //! Page routing and the shared, fixed status footer.
-use tinex_widgets::{Tone, Widget};
+use std::sync::Arc;
+use tinex_widgets::{LevelMeter, Slider, Tone, Widget};
 
 use super::action::UiAction;
-use super::state::{AppState, Page};
+use super::state::{AppState, Page, UiTrack};
 
 mod main;
 mod plugins;
@@ -39,6 +40,39 @@ pub(super) fn view(state: &AppState) -> Widget<UiAction> {
         Widget::percentage_meter(state.cpu_load.map_or(0.0, f64::from), 88.0),
     ]));
     Widget::Column(children)
+}
+
+/// Metering is reported before track gain; present the estimated post-gain level.
+fn track_volume_control(state: &AppState, track: &UiTrack, width: f64) -> Widget<UiAction> {
+    let track_id = track.id;
+    let gain = if track.volume_db == -61.0 {
+        0.0
+    } else {
+        10.0_f32.powf(track.volume_db / 20.0)
+    };
+    let level = if gain == 0.0 {
+        0.0
+    } else {
+        tinex_widgets::sanitize_level(track.output_level) * gain
+    };
+    Widget::MeterSlider {
+        slider: Slider {
+            id: track.volume_slider,
+            value: track.volume_db,
+            min: -61.0,
+            max: 12.0,
+            step: 1.0,
+            width,
+            enabled: state.connected && !track.deleting,
+            on_change: Arc::new(move |db| UiAction::SetTrackVolume { track_id, db }),
+        },
+        meter: LevelMeter::new(level),
+        readout: if track.volume_db == -61.0 {
+            "−∞ dB".into()
+        } else {
+            format!("{:+.0} dB", track.volume_db)
+        },
+    }
 }
 
 fn status(state: &AppState) -> (String, Tone) {

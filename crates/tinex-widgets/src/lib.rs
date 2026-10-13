@@ -28,7 +28,9 @@ mod framework;
 mod level_meter;
 mod text;
 
-pub use framework::{ActivationKey, Input, Tone, Ui, Widget, WidgetId, WidgetStyle};
+pub use framework::{
+    ActivationKey, AdjustmentKey, Input, Slider, Tone, Ui, Widget, WidgetId, WidgetStyle,
+};
 pub use level_meter::{
     LevelMeter, METER_MAX_DB, METER_MIN_DB, MeterStyle, amplitude_to_dbfs, sanitize_level,
 };

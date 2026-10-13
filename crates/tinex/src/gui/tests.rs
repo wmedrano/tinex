@@ -475,3 +475,81 @@ fn physical_pointer_coordinates_match_logical_layout_at_hidpi() {
         [UiAction::CreateTrack]
     ));
 }
+
+#[test]
+fn volume_requests_change_the_audio_mix_without_confirmation() {
+    struct Constant(f32);
+    impl tinex_core::plugin::Plugin for Constant {
+        fn process(
+            &mut self,
+            _: &[(usize, wmidi::MidiMessage)],
+            _: [&[f32]; 2],
+            output: [&mut [f32]; 2],
+        ) {
+            for channel in output {
+                channel.fill(self.0);
+            }
+        }
+    }
+    let (sender, requests) = mpsc::channel();
+    let (notifications, receiver) = mpsc::channel();
+    let mut engine = Tinex::new(requests, notifications);
+    let mut state = AppState::default();
+    for level in [0.25, 0.5] {
+        let mut effect = update::update(&mut state, Action::Ui(UiAction::CreateTrack))
+            .effects
+            .remove(0);
+        let TinexRequest::NewTrack(track) = &mut effect.request else {
+            panic!("expected track");
+        };
+        track.push_plugin(PluginInstance::new(Box::new(Constant(level))));
+        assert!(execute_effect(&sender, effect).is_none());
+    }
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    let id = state.tracks[0].id;
+    for (db, gain) in [
+        (-61.0, 0.0),
+        (-6.0, 10.0_f32.powf(-0.3)),
+        (0.0, 1.0),
+        (6.0, 10.0_f32.powf(0.3)),
+        (12.0, 10.0_f32.powf(0.6)),
+    ] {
+        assert!(dispatch::dispatch_action(
+            &mut state,
+            Action::Ui(UiAction::SetTrackVolume { track_id: id, db }),
+            &sender,
+            &receiver
+        ));
+        let mut left = [0.0; 8];
+        let mut right = [0.0; 8];
+        let arena = bumpalo::Bump::new();
+        engine.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &[],
+            output: [&mut left, &mut right],
+            _arena: &arena,
+        });
+        for sample in left.into_iter().chain(right) {
+            assert!((sample - (0.25 * gain + 0.5)).abs() < 1e-6);
+        }
+        assert_eq!(state.tracks[0].volume_db, db);
+        assert_eq!(state.tracks[1].volume_db, 0.0);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+    drop(engine);
+    // Keep a notification sender alive to exercise the failed request send path.
+    let (_notifications, receiver) = mpsc::channel();
+    dispatch::dispatch_action(
+        &mut state,
+        Action::Ui(UiAction::SetTrackVolume {
+            track_id: id,
+            db: -12.0,
+        }),
+        &sender,
+        &receiver,
+    );
+    assert!(!state.connected);
+    assert_eq!(state.tracks[0].volume_db, 12.0);
+}

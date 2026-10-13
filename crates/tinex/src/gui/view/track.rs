@@ -7,8 +7,8 @@ pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiActi
     let mut content = vec![
         Widget::Row {
             children: vec![
-                Widget::label("Output level", Tone::Normal),
-                Widget::level_meter(track.output_level, 144.0),
+                Widget::label("Volume / output", Tone::Normal),
+                super::track_volume_control(state, track, 240.0),
             ],
             surface: true,
         },

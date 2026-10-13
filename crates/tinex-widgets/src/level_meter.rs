@@ -21,10 +21,6 @@ pub fn amplitude_to_dbfs(amplitude: f32) -> f64 {
     }
 }
 
-fn position(db: f64) -> f64 {
-    ((db - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)).clamp(0.0, 1.0)
-}
-
 pub struct MeterStyle {
     pub trough: Color,
     pub normal: Color,
@@ -55,10 +51,22 @@ impl LevelMeter {
     }
 
     pub fn render(self, scene: &mut Scene, rect: Rect, scale: f64, style: &MeterStyle) {
+        self.render_with_range(scene, rect, scale, style, METER_MIN_DB, METER_MAX_DB);
+    }
+
+    pub(crate) fn render_with_range(
+        self,
+        scene: &mut Scene,
+        rect: Rect,
+        scale: f64,
+        style: &MeterStyle,
+        min_db: f64,
+        max_db: f64,
+    ) {
         if !scale.is_finite() || scale <= 0.0 {
             return;
         }
-        let Some(geometry) = self.geometry(rect) else {
+        let Some(geometry) = self.geometry_with_range(rect, min_db, max_db) else {
             return;
         };
         let transform = Affine::scale(scale);
@@ -87,7 +95,16 @@ impl LevelMeter {
         scene.pop_layer();
     }
 
+    #[cfg(test)]
     fn geometry(self, rect: Rect) -> Option<Geometry> {
+        self.geometry_with_range(rect, METER_MIN_DB, METER_MAX_DB)
+    }
+
+    fn geometry_with_range(self, rect: Rect, min_db: f64, max_db: f64) -> Option<Geometry> {
+        if !min_db.is_finite() || !max_db.is_finite() || min_db >= max_db {
+            return None;
+        }
+        let position = |db: f64| ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0);
         if ![
             rect.x0,
             rect.y0,
@@ -111,7 +128,7 @@ impl LevelMeter {
         );
         let db = self.dbfs();
         let fill = position(db);
-        let boundaries = [METER_MIN_DB, -12.0, -6.0, 0.0, METER_MAX_DB];
+        let boundaries = [min_db, -12.0, -6.0, 0.0, max_db];
         let segments = std::array::from_fn(|index| {
             let start = position(boundaries[index]);
             let end = position(boundaries[index + 1]).min(fill);
@@ -124,7 +141,7 @@ impl LevelMeter {
                 )
             })
         });
-        let overflow = (db > METER_MAX_DB).then(|| {
+        let overflow = (db > max_db).then(|| {
             Rect::new(
                 (bar.x1 - 4.0).max(bar.x0),
                 bar.y0 - 2.0,
@@ -260,6 +277,40 @@ mod tests {
             ] {
                 assert!(LevelMeter::new(amplitude).geometry(rect).is_none());
             }
+        }
+    }
+    #[test]
+    fn combined_meter_scale_aligns_unity_and_preserves_overflow_and_silence() {
+        let rect = Rect::new(8.0, 8.0, 208.0, 28.0);
+        for db in [-60.0_f32, -6.0, 0.0, 6.0, 12.0] {
+            let geometry = LevelMeter::new(10.0_f32.powf(db / 20.0))
+                .geometry_with_range(rect, -61.0, 12.0)
+                .unwrap();
+            let right = geometry.segments.iter().flatten().last().unwrap().x1;
+            let thumb = rect.x0 + f64::from((db + 61.0) / 73.0) * rect.width();
+            assert!((right - thumb).abs() < 0.0001);
+            assert!((geometry.reference_x - (rect.x0 + 61.0 / 73.0 * rect.width())).abs() < 1e-6);
+        }
+        for amplitude in [0.0, f32::NAN, -1.0] {
+            let geometry = LevelMeter::new(amplitude)
+                .geometry_with_range(rect, -61.0, 12.0)
+                .unwrap();
+            assert!(geometry.segments.iter().all(Option::is_none));
+            assert!(geometry.overflow.is_none());
+        }
+        for amplitude in [4.0, 16.0, f32::INFINITY] {
+            let geometry = LevelMeter::new(amplitude)
+                .geometry_with_range(rect, -61.0, 12.0)
+                .unwrap();
+            assert!(geometry.overflow.is_some());
+            assert_eq!(geometry.segments[3].unwrap().x1, rect.x1);
+        }
+        for (min, max) in [(f64::NAN, 12.0), (-61.0, f64::INFINITY), (12.0, -61.0)] {
+            assert!(
+                LevelMeter::new(1.0)
+                    .geometry_with_range(rect, min, max)
+                    .is_none()
+            );
         }
     }
 }
