@@ -16,14 +16,6 @@ const TRACK_CAPACITY: usize = 64;
 /// Meter smoothing time constant in seconds; silence falls by 90% in about 230 ms.
 const OUTPUT_LEVEL_TIME_CONSTANT: f64 = 0.1;
 
-fn output_level_weight(frames: usize, sample_rate: u32) -> f64 {
-    if sample_rate == 0 {
-        return 0.0;
-    }
-    let seconds = frames as f64 / f64::from(sample_rate);
-    -(-seconds / OUTPUT_LEVEL_TIME_CONSTANT).exp_m1()
-}
-
 pub struct Tinex {
     tracks: Vec<Track>,
     output_level: f64,
@@ -106,6 +98,14 @@ impl Tinex {
                             .send(TinexNotification::TrackDeleted(track));
                     }
                 }
+                TinexRequest::ArmTracks(track_ids) => {
+                    for track in self.tracks.iter_mut() {
+                        track.armed = track_ids.contains(&track.id());
+                    }
+                    let _ = self
+                        .notifications
+                        .send(TinexNotification::ArmTracks(track_ids));
+                }
                 TinexRequest::AddPlugin { track_id, plugin } => {
                     if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
                     {
@@ -162,6 +162,7 @@ impl Tinex {
                         mix_right,
                     ] = buffers;
                     for track in tracks {
+                        let midi_input = if track.armed { midi_input } else { &[] };
                         let output = track.process(
                             midi_input,
                             input,
@@ -204,6 +205,14 @@ impl Tinex {
     }
 }
 
+fn output_level_weight(frames: usize, sample_rate: u32) -> f64 {
+    if sample_rate == 0 {
+        return 0.0;
+    }
+    let seconds = frames as f64 / f64::from(sample_rate);
+    -(-seconds / OUTPUT_LEVEL_TIME_CONSTANT).exp_m1()
+}
+
 fn mix_with_volume(dst: &mut [f32], src: &[f32], volume: f32) {
     for (dst, src) in dst.iter_mut().zip(src.iter()) {
         *dst += volume * *src;
@@ -221,7 +230,11 @@ mod tests {
     use crate::track::TrackId;
 
     use super::*;
-    use std::{collections::HashMap, sync::mpsc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::{Arc, Mutex, mpsc},
+    };
+    use wmidi::{Channel, ControlFunction, Note, U7};
 
     fn process(
         tinex: &mut Tinex,
@@ -783,6 +796,216 @@ mod tests {
             .unwrap();
         assert_eq!(render(&mut tinex, &arena), (0.625, 0.625));
         assert_eq!(received.try_iter().count(), 5);
+    }
+
+    /// Frame offsets and MIDI messages delivered to a plugin.
+    type Events = Vec<(usize, MidiMessage<'static>)>;
+
+    /// Records the events handed to a plugin and outputs one unit of gain per event.
+    #[derive(Clone, Default)]
+    struct Seen(Arc<Mutex<Events>>);
+
+    impl Seen {
+        /// Replaces the recorded events with the ones handed to this plugin call.
+        fn record(&self, midi: &[(usize, MidiMessage)]) {
+            let mut events = self.0.lock().unwrap();
+            events.clear();
+            events.extend(
+                midi.iter()
+                    .map(|(frame, message)| (*frame, message.to_owned())),
+            );
+        }
+    }
+
+    struct MidiRecorder {
+        gain: f32,
+        seen: Seen,
+    }
+
+    impl plugin::Plugin for MidiRecorder {
+        fn process(
+            &mut self,
+            midi: &[(usize, MidiMessage)],
+            _: [&[f32]; 2],
+            output: [&mut [f32]; 2],
+        ) {
+            self.seen.record(midi);
+            for channel in output {
+                channel.fill(self.gain * midi.len() as f32);
+            }
+        }
+    }
+
+    fn new_recorder(gain: f32) -> (Track, Seen) {
+        let seen = Seen::default();
+        let track = Track::with_plugin(MidiRecorder {
+            gain,
+            seen: seen.clone(),
+        });
+        (track, seen)
+    }
+
+    #[test]
+    fn arm_delivers_midi_only_to_the_named_tracks() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let (first, first_seen) = new_recorder(1.0);
+        let first_id = first.id();
+        let (second, second_seen) = new_recorder(1.0);
+        sender.send(TinexRequest::NewTrack(first)).unwrap();
+        sender.send(TinexRequest::NewTrack(second)).unwrap();
+
+        // Two simultaneous events and a release just after the last sample.
+        let midi = [
+            (
+                0,
+                MidiMessage::NoteOn(Channel::Ch1, Note::C4, U7::try_from(100).unwrap()),
+            ),
+            (
+                0,
+                MidiMessage::ControlChange(
+                    Channel::Ch1,
+                    ControlFunction::from(U7::try_from(7).unwrap()),
+                    U7::try_from(100).unwrap(),
+                ),
+            ),
+            (
+                8,
+                MidiMessage::NoteOff(Channel::Ch1, Note::C4, U7::try_from(0).unwrap()),
+            ),
+        ];
+        let arena = bumpalo::Bump::new();
+        let mut left = [99.0; 8];
+        let mut right = [99.0; 8];
+
+        // New tracks start unarmed, so no plugin sees the events and the mix is silent.
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &midi,
+            output: [&mut left, &mut right],
+            _arena: &arena,
+        });
+        assert_eq!(left, [0.0; 8]);
+        assert_eq!(right, [0.0; 8]);
+        assert!(first_seen.0.lock().unwrap().is_empty());
+        assert!(second_seen.0.lock().unwrap().is_empty());
+        assert_eq!(received.try_iter().count(), 2);
+
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::from([first_id])))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &midi,
+            output: [&mut left, &mut right],
+            _arena: &arena,
+        });
+        assert_eq!(left, [3.0; 8]);
+        assert_eq!(right, [3.0; 8]);
+        // The armed track is handed every event, unfiltered and in order.
+        assert_eq!(*first_seen.0.lock().unwrap(), midi);
+        assert!(second_seen.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn arm_set_replaces_the_previous_one() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let (first, first_seen) = new_recorder(1.0);
+        let first_id = first.id();
+        let (second, second_seen) = new_recorder(0.5);
+        let second_id = second.id();
+        sender.send(TinexRequest::NewTrack(first)).unwrap();
+        sender.send(TinexRequest::NewTrack(second)).unwrap();
+
+        let midi = [(
+            0,
+            MidiMessage::NoteOn(Channel::Ch1, Note::C4, U7::try_from(100).unwrap()),
+        )];
+        let arena = bumpalo::Bump::new();
+        let mut left = [99.0; 8];
+        let mut right = [99.0; 8];
+
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::from([
+                first_id, second_id,
+            ])))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &midi,
+            output: [&mut left, &mut right],
+            _arena: &arena,
+        });
+        assert_eq!(left, [1.5; 8]);
+        assert_eq!(right, [1.5; 8]);
+        assert_eq!(*first_seen.0.lock().unwrap(), midi);
+        assert_eq!(*second_seen.0.lock().unwrap(), midi);
+        assert_eq!(received.try_iter().count(), 3);
+
+        // Arming is a snapshot of the whole set, not an additive request.
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::from([second_id])))
+            .unwrap();
+        for _ in 0..2 {
+            tinex.process(ProcessArgs {
+                sample_rate: 48_000,
+                input: [&[], &[]],
+                midi_input: &midi,
+                output: [&mut left, &mut right],
+                _arena: &arena,
+            });
+            assert_eq!(left, [0.5; 8]);
+            assert_eq!(right, [0.5; 8]);
+            assert!(first_seen.0.lock().unwrap().is_empty());
+            assert_eq!(*second_seen.0.lock().unwrap(), midi);
+        }
+
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::new()))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &midi,
+            output: [&mut left, &mut right],
+            _arena: &arena,
+        });
+        assert_eq!(left, [0.0; 8]);
+        assert_eq!(right, [0.0; 8]);
+        assert!(second_seen.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn arm_tracks_echoes_the_requested_set() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let track = Track::with_plugin(plugin::Silence);
+        let id = track.id();
+        let unknown = TrackId::new();
+        sender.send(TinexRequest::NewTrack(track)).unwrap();
+
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::from([id, unknown])))
+            .unwrap();
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::new()))
+            .unwrap();
+        let notifications = process(&mut tinex, &received);
+        // One echo per request, in order, holding the requested ids including unknown ones.
+        assert!(matches!(notifications.as_slice(), [
+            TinexNotification::TrackCreated(_),
+            TinexNotification::ArmTracks(armed),
+            TinexNotification::ArmTracks(disarmed),
+        ] if armed.len() == 2 && armed.contains(&id) && armed.contains(&unknown)
+            && disarmed.is_empty()));
+        assert!(process(&mut tinex, &received).is_empty());
     }
 
     #[test]

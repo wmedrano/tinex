@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     plugin::{PluginInstance, PluginInstanceId},
@@ -13,6 +13,7 @@ pub enum TinexRequest {
     SetTrackVolume(TrackId, f32),
     NewTrack(Track),
     DeleteTrack(TrackId),
+    ArmTracks(HashSet<TrackId>),
     AddPlugin {
         track_id: TrackId,
         plugin: PluginInstance,
@@ -28,5 +29,6 @@ pub enum TinexNotification {
     TrackCreated(TrackId),
     TrackCreationFailed(Track),
     TrackDeleted(Track),
+    ArmTracks(HashSet<TrackId>),
     PluginAdded(TrackId, PluginInstanceId),
 }

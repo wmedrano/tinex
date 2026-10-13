@@ -8,6 +8,7 @@ pub type TrackId = Id<Track>;
 
 pub struct Track {
     pub volume: f32,
+    pub armed: bool,
     id: TrackId,
     output_level: f64,
     plugins: Vec<PluginInstance>,
@@ -27,6 +28,7 @@ impl Track {
     pub fn new() -> Self {
         Self {
             volume: 1.0,
+            armed: false,
             id: Id::new(),
             output_level: 0.0,
             plugins: Vec::with_capacity(8),
