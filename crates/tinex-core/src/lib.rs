@@ -1,19 +1,14 @@
 //! Tinex audio processing engine and plugin interfaces.
-use std::{
-    collections::HashMap,
-    sync::mpsc::{Receiver, Sender},
-};
+use std::sync::mpsc::{Receiver, Sender};
 
 use rayon::prelude::*;
 use wmidi::MidiMessage;
 
-use crate::{
-    id::Id,
-    plugin::{PluginInstance, PluginInstanceId},
-    track::{Track, TrackId},
-};
+use crate::track::Track;
+pub use message::{TinexNotification, TinexRequest};
 
 pub mod id;
+mod message;
 pub mod plugin;
 pub mod track;
 
@@ -34,32 +29,6 @@ pub struct Tinex {
     output_level: f64,
     requests: Receiver<TinexRequest>,
     notifications: Sender<TinexNotification>,
-}
-
-#[allow(unused)]
-pub enum TinexRequest {
-    NewTrack(Track),
-    AddPlugin {
-        track_id: TrackId,
-        plugin: PluginInstance,
-    },
-    DeleteTrack(Id<Track>),
-    /// Updates the supplied track entries with exponentially weighted block peak levels.
-    /// Missing tracks receive zero; the response returns the same map allocation.
-    OutputLevel(HashMap<TrackId, f32>),
-}
-
-#[derive(Debug)]
-#[allow(unused)]
-pub enum TinexNotification {
-    TrackCreated(Id<Track>),
-    TrackCreationFailed(Track),
-    TrackDeleted(Track),
-    PluginAdded(TrackId, PluginInstanceId),
-    OutputLevel {
-        output_level: f32,
-        tracks: HashMap<TrackId, f32>,
-    },
 }
 
 pub struct ProcessArgs<'a, 'out> {
@@ -93,28 +62,6 @@ impl Tinex {
     fn handle_requests(&mut self) {
         for request in self.requests.try_iter() {
             match request {
-                TinexRequest::NewTrack(track) => {
-                    // Zero-sized tracks give Vec a capacity of usize::MAX.
-                    if self.tracks.len() >= self.tracks.capacity().min(TRACK_CAPACITY) {
-                        let _ = self
-                            .notifications
-                            .send(TinexNotification::TrackCreationFailed(track));
-                        continue;
-                    }
-                    let id = track.id();
-                    self.tracks.push(track);
-                    let _ = self.notifications.send(TinexNotification::TrackCreated(id));
-                }
-                TinexRequest::AddPlugin { track_id, plugin } => {
-                    if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
-                    {
-                        let plugin_id = plugin.id();
-                        track.push_plugin(plugin);
-                        let _ = self
-                            .notifications
-                            .send(TinexNotification::PluginAdded(track_id, plugin_id));
-                    }
-                }
                 TinexRequest::OutputLevel(mut tracks) => {
                     for (id, level) in tracks.iter_mut() {
                         *level = self
@@ -128,12 +75,34 @@ impl Tinex {
                         tracks,
                     });
                 }
+                TinexRequest::NewTrack(track) => {
+                    // Zero-sized tracks give Vec a capacity of usize::MAX.
+                    if self.tracks.len() >= self.tracks.capacity().min(TRACK_CAPACITY) {
+                        let _ = self
+                            .notifications
+                            .send(TinexNotification::TrackCreationFailed(track));
+                        continue;
+                    }
+                    let id = track.id();
+                    self.tracks.push(track);
+                    let _ = self.notifications.send(TinexNotification::TrackCreated(id));
+                }
                 TinexRequest::DeleteTrack(id) => {
                     if let Some(index) = self.tracks.iter().position(|track| track.id() == id) {
                         let track = self.tracks.remove(index);
                         let _ = self
                             .notifications
                             .send(TinexNotification::TrackDeleted(track));
+                    }
+                }
+                TinexRequest::AddPlugin { track_id, plugin } => {
+                    if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
+                    {
+                        let plugin_id = plugin.id();
+                        track.push_plugin(plugin);
+                        let _ = self
+                            .notifications
+                            .send(TinexNotification::PluginAdded(track_id, plugin_id));
                     }
                 }
             }
@@ -223,8 +192,10 @@ fn mix(dst: &mut [f32], src: &[f32]) {
 
 #[cfg(test)]
 mod tests {
+    use crate::track::TrackId;
+
     use super::*;
-    use std::sync::mpsc;
+    use std::{collections::HashMap, sync::mpsc};
 
     fn process(
         tinex: &mut Tinex,
@@ -614,11 +585,15 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
-        sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
+        sender
+            .send(TinexRequest::DeleteTrack(TrackId::new()))
+            .unwrap();
         sender
             .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
             .unwrap();
-        sender.send(TinexRequest::DeleteTrack(Id::new())).unwrap();
+        sender
+            .send(TinexRequest::DeleteTrack(TrackId::new()))
+            .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
             [TinexNotification::TrackCreated(id)] if *id == tinex.tracks[0].id()

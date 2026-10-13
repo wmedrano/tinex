@@ -122,6 +122,22 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 result.changed = true;
             }
         }
+        Action::Notification(TinexNotification::OutputLevel {
+            output_level,
+            mut tracks,
+        }) if state.connected => {
+            state.level_request_in_flight = false;
+            let level = sanitize_level(output_level);
+            result.changed |= state.master_output_level != level;
+            state.master_output_level = level;
+            for row in &mut state.tracks {
+                let level = sanitize_level(tracks.get(&row.id).copied().unwrap_or(0.0));
+                result.changed |= row.output_level != level;
+                row.output_level = level;
+            }
+            tracks.retain(|id, _| state.tracks.iter().any(|row| row.id == *id));
+            state.level_request_buffer = tracks;
+        }
         Action::Notification(TinexNotification::TrackCreated(id)) => {
             if let Some(pending) = state.pending.remove(&id) {
                 state.tracks.push(UiTrack {
@@ -137,14 +153,6 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     output_level: 0.0,
                 });
                 state.tracks.sort_by_key(|row| row.number);
-                result.changed = true;
-            }
-        }
-        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)) => {
-            if let Some(row) = state.tracks.iter_mut().find(|row| row.id == track_id)
-                && let Some(plugin) = row.pending_plugins.remove(&plugin_id)
-            {
-                row.plugins.push(plugin);
                 result.changed = true;
             }
         }
@@ -167,21 +175,13 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 result.changed = true;
             }
         }
-        Action::Notification(TinexNotification::OutputLevel {
-            output_level,
-            mut tracks,
-        }) if state.connected => {
-            state.level_request_in_flight = false;
-            let level = sanitize_level(output_level);
-            result.changed |= state.master_output_level != level;
-            state.master_output_level = level;
-            for row in &mut state.tracks {
-                let level = sanitize_level(tracks.get(&row.id).copied().unwrap_or(0.0));
-                result.changed |= row.output_level != level;
-                row.output_level = level;
+        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)) => {
+            if let Some(row) = state.tracks.iter_mut().find(|row| row.id == track_id)
+                && let Some(plugin) = row.pending_plugins.remove(&plugin_id)
+            {
+                row.plugins.push(plugin);
+                result.changed = true;
             }
-            tracks.retain(|id, _| state.tracks.iter().any(|row| row.id == *id));
-            state.level_request_buffer = tracks;
         }
         Action::RequestFailed(operation) => {
             match operation {
