@@ -1,7 +1,7 @@
 //! Tinex audio processing engine and plugin interfaces.
 use std::sync::mpsc::{Receiver, Sender};
 
-use rayon::prelude::*;
+use rayon::{ThreadPoolBuildError, prelude::*};
 use wmidi::MidiMessage;
 
 use crate::track::Track;
@@ -29,6 +29,7 @@ pub struct Tinex {
     output_level: f64,
     requests: Receiver<TinexRequest>,
     notifications: Sender<TinexNotification>,
+    thread_pool: rayon::ThreadPool,
 }
 
 pub struct ProcessArgs<'a, 'out> {
@@ -41,15 +42,21 @@ pub struct ProcessArgs<'a, 'out> {
 }
 
 impl Tinex {
-    pub fn new(requests: Receiver<TinexRequest>, notifications: Sender<TinexNotification>) -> Self {
-        // Start Rayon before the first audio callback needs its workers.
-        let _ = rayon::current_num_threads();
-        Self {
+    pub fn new(
+        requests: Receiver<TinexRequest>,
+        notifications: Sender<TinexNotification>,
+    ) -> Result<Tinex, ThreadPoolBuildError> {
+        // Start the dedicated workers before the first audio callback.
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("tinex-dsp-{index}"))
+            .build()?;
+        Ok(Tinex {
             tracks: Vec::with_capacity(TRACK_CAPACITY),
             output_level: 0.0,
             requests,
             notifications,
-        }
+            thread_pool,
+        })
     }
 
     /// Handles pending requests, processes audio, and updates the weighted peak output level.
@@ -120,10 +127,11 @@ impl Tinex {
         if self.tracks.is_empty() {
             return;
         }
-        let worker_count = rayon::current_num_threads();
+        let worker_count = self.thread_pool.current_num_threads();
         let chunk_size = self.tracks.len().div_ceil(worker_count);
         let chunk_count = self.tracks.len().div_ceil(chunk_size);
-        let mut buffers = bumpalo::collections::Vec::with_capacity_in(chunk_count, args._arena);
+        let mut buffers: bumpalo::collections::Vec<'_, [&mut [f32]; 6]> =
+            bumpalo::collections::Vec::with_capacity_in(chunk_count, args._arena);
         for _ in 0..chunk_count {
             // Four channels for Track::process and two for this chunk's mix.
             buffers.push(std::array::from_fn::<_, 6, _>(|index| {
@@ -131,37 +139,45 @@ impl Tinex {
                     .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
             }));
         }
-        let midi_input = args.midi_input;
-        let input = args.input;
-        let sample_rate = args.sample_rate;
-        self.tracks
-            .par_chunks_mut(chunk_size)
-            .zip(buffers.par_iter_mut())
-            .for_each(|(tracks, buffers)| {
-                let [
-                    left,
-                    right,
-                    scratch_left,
-                    scratch_right,
-                    mix_left,
-                    mix_right,
-                ] = buffers;
-                for track in tracks {
-                    let output = track.process(
-                        midi_input,
-                        input,
-                        [
-                            &mut **left,
-                            &mut **right,
-                            &mut **scratch_left,
-                            &mut **scratch_right,
-                        ],
-                        sample_rate,
-                    );
-                    mix_with_volume(mix_left, output[0], track.volume);
-                    mix_with_volume(mix_right, output[1], track.volume);
-                }
-            });
+        // Send only the allocated slices to workers, not the arena-backed Vec.
+        let buffers = buffers.into_bump_slice_mut();
+        let ProcessArgs {
+            midi_input,
+            input,
+            sample_rate,
+            ..
+        } = *args;
+        let tracks = &mut self.tracks;
+        self.thread_pool.install(|| {
+            tracks
+                .par_chunks_mut(chunk_size)
+                .zip(buffers.par_iter_mut())
+                .for_each(|(tracks, buffers)| {
+                    let [
+                        left,
+                        right,
+                        scratch_left,
+                        scratch_right,
+                        mix_left,
+                        mix_right,
+                    ] = buffers;
+                    for track in tracks {
+                        let output = track.process(
+                            midi_input,
+                            input,
+                            [
+                                &mut **left,
+                                &mut **right,
+                                &mut **scratch_left,
+                                &mut **scratch_right,
+                            ],
+                            sample_rate,
+                        );
+                        mix_with_volume(mix_left, output[0], track.volume);
+                        mix_with_volume(mix_right, output[1], track.volume);
+                    }
+                });
+        });
         for buffers in buffers.iter() {
             for (output, source) in args.output.iter_mut().zip(&buffers[4..]) {
                 mix(output, source);
@@ -230,7 +246,7 @@ mod tests {
     fn sends_levels_only_when_requested() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         assert!(process(&mut tinex, &received).is_empty());
         assert!(process(&mut tinex, &received).is_empty());
 
@@ -267,6 +283,13 @@ mod tests {
                 _: [&[f32]; 2],
                 output: [&mut [f32]; 2],
             ) {
+                assert_eq!(rayon::current_num_threads(), 2);
+                assert!(
+                    std::thread::current()
+                        .name()
+                        .unwrap()
+                        .starts_with("tinex-test-dsp-")
+                );
                 for (index, channel) in output.into_iter().enumerate() {
                     channel.fill(self.0 * (index as f32 + 1.0));
                 }
@@ -275,31 +298,30 @@ mod tests {
 
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         for value in [0.25, 0.5, -0.125] {
             sender
                 .send(TinexRequest::NewTrack(Track::with_plugin(Fill(value))))
                 .unwrap();
         }
-        let pool = rayon::ThreadPoolBuilder::new()
+        tinex.thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
+            .thread_name(|index| format!("tinex-test-dsp-{index}"))
             .build()
             .unwrap();
         let mut left = [99.0; 3];
         let mut right = [99.0; 2];
-        pool.install(|| {
-            let mut arena = bumpalo::Bump::new();
-            for _ in 0..2 {
-                arena.reset();
-                tinex.process(ProcessArgs {
-                    sample_rate: 48_000,
-                    input: [&[], &[]],
-                    midi_input: &[],
-                    output: [&mut left, &mut right],
-                    _arena: &arena,
-                });
-            }
-        });
+        let mut arena = bumpalo::Bump::new();
+        for _ in 0..2 {
+            arena.reset();
+            tinex.process(ProcessArgs {
+                sample_rate: 48_000,
+                input: [&[], &[]],
+                midi_input: &[],
+                output: [&mut left, &mut right],
+                _arena: &arena,
+            });
+        }
         assert_eq!(left, [0.625; 3]);
         assert_eq!(right, [1.25; 2]);
         assert_eq!(received.try_iter().count(), 3);
@@ -324,7 +346,7 @@ mod tests {
 
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         sender
             .send(TinexRequest::OutputLevel(HashMap::new()))
             .unwrap();
@@ -397,7 +419,7 @@ mod tests {
 
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let first = Track::with_plugin(Level(1.0));
         let second = Track::with_plugin(Level(0.5));
         let omitted = Track::with_plugin(Level(0.25));
@@ -496,7 +518,7 @@ mod tests {
     fn level_requests_follow_track_creation_order() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let track = Track::with_plugin(plugin::Silence);
         let id = track.id();
         sender
@@ -519,7 +541,7 @@ mod tests {
     fn rejects_tracks_at_capacity_and_accepts_after_deletion() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let capacity = TRACK_CAPACITY;
         let vector_capacity = tinex.tracks.capacity();
         for _ in 0..capacity {
@@ -565,7 +587,7 @@ mod tests {
     fn processes_queued_requests_in_order_across_callbacks() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let first = Track::with_plugin(plugin::Silence);
         let first_id = first.id();
         let second = Track::with_plugin(plugin::Silence);
@@ -598,7 +620,7 @@ mod tests {
     fn ignores_unknown_track_ids() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         sender
             .send(TinexRequest::DeleteTrack(TrackId::new()))
             .unwrap();
@@ -619,7 +641,7 @@ mod tests {
     fn deletes_by_id_after_indices_shift_and_ignores_repeated_deletion() {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let tracks = [
             Track::with_plugin(plugin::Silence),
             Track::with_plugin(plugin::Silence),
@@ -675,7 +697,7 @@ mod tests {
 
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let first = Track::with_plugin(Fill(0.5));
         let first_id = first.id();
         let second = Track::with_plugin(Fill(0.125));
@@ -726,7 +748,7 @@ mod tests {
 
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         let tracks = [
             Track::with_plugin(Tone(0.25)),
             Track::with_plugin(Tone(0.125)),
@@ -768,7 +790,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let (notifications, received) = mpsc::channel();
         drop(received);
-        let mut tinex = Tinex::new(receiver, notifications);
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
         sender
             .send(TinexRequest::NewTrack(Track::with_plugin(plugin::Silence)))
             .unwrap();

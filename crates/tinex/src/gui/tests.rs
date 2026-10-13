@@ -39,7 +39,7 @@ fn send_actions(state: &mut AppState, sender: &Sender<TinexRequest>, action: UiA
 fn engine_round_trip_confirms_creation_and_deletion() {
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     send_actions(&mut state, &sender, UiAction::CreateTrack);
     assert!(state.tracks.is_empty());
@@ -61,7 +61,7 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     use tinex_widgets::Widget;
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     for _ in 0..2 {
         send_actions(&mut state, &sender, UiAction::CreateTrack);
@@ -147,7 +147,7 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
 fn capacity_failure_is_reported_without_a_phantom_row() {
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     for _ in 0..65 {
         send_actions(&mut state, &sender, UiAction::CreateTrack);
@@ -335,7 +335,7 @@ fn weighted_peak_levels_above_unity_survive_the_engine_round_trip() {
     }
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     let mut effect = update::update(&mut state, Action::Ui(UiAction::CreateTrack))
         .effects
@@ -413,7 +413,7 @@ fn master_level_comes_from_the_mix_not_from_adding_track_meters() {
     }
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     for value in [2.0, -2.0] {
         let mut effect = update::update(&mut state, Action::Ui(UiAction::CreateTrack))
@@ -493,7 +493,7 @@ fn volume_requests_change_the_audio_mix_without_confirmation() {
     }
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
-    let mut engine = Tinex::new(requests, notifications);
+    let mut engine = Tinex::new(requests, notifications).unwrap();
     let mut state = AppState::default();
     for level in [0.25, 0.5] {
         let mut effect = update::update(&mut state, Action::Ui(UiAction::CreateTrack))

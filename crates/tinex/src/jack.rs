@@ -51,7 +51,7 @@ impl ProcessHandler {
         notifications: mpsc::Sender<TinexNotification>,
     ) -> Result<ProcessHandler> {
         Ok(ProcessHandler {
-            tinex: Tinex::new(requests, notifications),
+            tinex: Tinex::new(requests, notifications)?,
             arena: bumpalo::Bump::with_capacity(64 * 1024),
             midi_in: client.register_port("midi-in", jack::MidiIn::default())?,
             audio_in: make_ports(client, jack::AudioIn::default(), "audio-in")?,
