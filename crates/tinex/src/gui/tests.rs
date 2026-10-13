@@ -57,6 +57,104 @@ fn engine_round_trip_confirms_creation_and_deletion() {
 }
 
 #[test]
+fn engine_round_trip_arms_switches_and_disarms_tracks() {
+    let (sender, requests) = mpsc::channel();
+    let (notifications, receiver) = mpsc::channel();
+    let mut engine = Tinex::new(requests, notifications).unwrap();
+    let mut state = AppState::default();
+    for _ in 0..2 {
+        send_actions(&mut state, &sender, UiAction::CreateTrack);
+    }
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    let first = state.tracks[0].id;
+    let second = state.tracks[1].id;
+    for (id, armed) in [
+        (first, [true, false]),
+        (second, [false, true]),
+        (second, [false, false]),
+    ] {
+        let before: Vec<_> = state.tracks.iter().map(|track| track.armed).collect();
+        assert!(dispatch_action(
+            &mut state,
+            Action::Ui(UiAction::ToggleTrackArm(id)),
+            &sender,
+            &receiver
+        ));
+        assert!(state.arm_request_in_flight);
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .map(|track| track.armed)
+                .collect::<Vec<_>>(),
+            before
+        );
+        process(&mut engine);
+        assert!(super::dispatch::poll_notifications(
+            &mut state, &receiver, &sender
+        ));
+        assert!(!state.arm_request_in_flight);
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .map(|track| track.armed)
+                .collect::<Vec<_>>(),
+            armed
+        );
+    }
+}
+
+#[test]
+fn arming_dispatch_settles_queued_confirmation_before_the_next_toggle() {
+    let (sender, requests) = mpsc::channel();
+    let (notifications, receiver) = mpsc::channel();
+    let mut state = AppState::default();
+    send_actions(&mut state, &sender, UiAction::CreateTrack);
+    let TinexRequest::NewTrack(track) = requests.recv().unwrap() else {
+        panic!("expected track")
+    };
+    notifications
+        .send(TinexNotification::TrackCreated(track.id()))
+        .unwrap();
+    dispatch_action(
+        &mut state,
+        Action::Ui(UiAction::ToggleTrackArm(track.id())),
+        &sender,
+        &receiver,
+    );
+    assert!(
+        matches!(requests.recv().unwrap(), TinexRequest::ArmTracks(ids) if ids == [track.id()].into())
+    );
+    notifications
+        .send(TinexNotification::ArmTracks([track.id()].into()))
+        .unwrap();
+    dispatch_action(
+        &mut state,
+        Action::Ui(UiAction::ToggleTrackArm(track.id())),
+        &sender,
+        &receiver,
+    );
+    assert!(state.tracks[0].armed && state.arm_request_in_flight);
+    assert!(matches!(requests.recv().unwrap(), TinexRequest::ArmTracks(ids) if ids.is_empty()));
+
+    // A closed request channel clears pending state without pretending disarm succeeded.
+    notifications
+        .send(TinexNotification::ArmTracks([track.id()].into()))
+        .unwrap();
+    drop(requests);
+    assert!(dispatch_action(
+        &mut state,
+        Action::Ui(UiAction::ToggleTrackArm(track.id())),
+        &sender,
+        &receiver
+    ));
+    assert!(!state.connected && !state.arm_request_in_flight);
+    assert!(state.tracks[0].armed);
+}
+
+#[test]
 fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     use tinex_widgets::Widget;
     let (sender, requests) = mpsc::channel();

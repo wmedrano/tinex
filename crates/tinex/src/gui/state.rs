@@ -8,8 +8,10 @@ pub(super) struct UiTrack {
     pub name: String,
     pub number: u64,
     pub row: WidgetId,
-    pub open_button: WidgetId,
     pub delete_button: WidgetId,
+    pub arm_button: WidgetId,
+    /// Confirmed membership in the engine's armed-track set.
+    pub armed: bool,
     pub volume_slider: WidgetId,
     /// Requested dB setting; -61 represents silence.
     pub volume_db: f32,
@@ -64,6 +66,8 @@ pub(super) struct AppState {
     /// JACK CPU utilization percentage, rounded to one decimal for display.
     pub cpu_load: Option<f32>,
     pub level_request_in_flight: bool,
+    /// Arming replaces the whole set, so serialize requests across all tracks.
+    pub arm_request_in_flight: bool,
     /// Returned by the engine and reused for the next level request.
     pub level_request_buffer: HashMap<TrackId, f32>,
 }
@@ -89,6 +93,7 @@ impl Default for AppState {
             master_output_level: 0.0,
             cpu_load: None,
             level_request_in_flight: false,
+            arm_request_in_flight: false,
             level_request_buffer: HashMap::new(),
         }
     }

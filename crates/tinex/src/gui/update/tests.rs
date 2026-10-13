@@ -1,6 +1,146 @@
 use super::*;
 use tinex_core::track::TrackId;
 
+#[test]
+fn arming_replaces_the_set_and_waits_for_confirmation() {
+    let mut state = AppState::default();
+    let first = create(&mut state);
+    let second = create(&mut state);
+    confirm(&mut state, first.id());
+    confirm(&mut state, second.id());
+    let button = state.tracks[0].arm_button;
+    state.page = Page::Track(first.id());
+    for (id, expected, confirmed) in [
+        (first.id(), [first.id()].into(), [true, false]),
+        (second.id(), [second.id()].into(), [false, true]),
+        (second.id(), Default::default(), [false, false]),
+    ] {
+        let before: Vec<_> = state.tracks.iter().map(|track| track.armed).collect();
+        let result = update(&mut state, Action::Ui(UiAction::ToggleTrackArm(id)));
+        assert!(result.changed);
+        assert!(matches!(result.effects.as_slice(), [Effect {
+            request: TinexRequest::ArmTracks(ids), operation: Operation::ArmTracks,
+        }] if *ids == expected));
+        assert!(state.arm_request_in_flight);
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .map(|track| track.armed)
+                .collect::<Vec<_>>(),
+            before
+        );
+        for other in [first.id(), second.id()] {
+            let ignored = update(&mut state, Action::Ui(UiAction::ToggleTrackArm(other)));
+            assert!(!ignored.changed && ignored.effects.is_empty());
+        }
+        let notification = || Action::Notification(TinexNotification::ArmTracks(expected.clone()));
+        assert!(update(&mut state, notification()).changed);
+        assert!(!state.arm_request_in_flight);
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .map(|track| track.armed)
+                .collect::<Vec<_>>(),
+            confirmed
+        );
+        assert!(!update(&mut state, notification()).changed);
+        assert_eq!(state.page, Page::Track(first.id()));
+        assert_eq!(state.tracks[0].arm_button, button);
+    }
+}
+
+#[test]
+fn arming_ignores_unavailable_tracks_and_late_deleted_ids() {
+    let mut state = AppState::default();
+    let first = create(&mut state);
+    let second = create(&mut state);
+    for id in [first.id(), TrackId::new()] {
+        assert!(
+            update(&mut state, Action::Ui(UiAction::ToggleTrackArm(id)))
+                .effects
+                .is_empty()
+        );
+    }
+    confirm(&mut state, first.id());
+    confirm(&mut state, second.id());
+    state.tracks[0].deleting = true;
+    assert!(
+        update(&mut state, Action::Ui(UiAction::ToggleTrackArm(first.id())))
+            .effects
+            .is_empty()
+    );
+    state.tracks[0].deleting = false;
+    update(&mut state, Action::Ui(UiAction::ToggleTrackArm(first.id())));
+    let first_id = first.id();
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::TrackDeleted(first)),
+    );
+    assert!(state.arm_request_in_flight);
+    assert!(
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::ArmTracks(
+                [first_id, TrackId::new()].into(),
+            ))
+        )
+        .changed
+    );
+    assert!(!state.arm_request_in_flight);
+    assert!(!state.tracks[0].armed);
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::ArmTracks([second.id()].into())),
+    );
+    assert!(state.tracks[0].armed);
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::TrackDeleted(second)),
+    );
+    assert!(state.tracks.is_empty());
+}
+
+#[test]
+fn arming_failure_and_disconnection_preserve_confirmed_state() {
+    for failed_send in [false, true] {
+        let mut state = AppState::default();
+        let track = create(&mut state);
+        confirm(&mut state, track.id());
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::ArmTracks([track.id()].into())),
+        );
+        let effect = update(&mut state, Action::Ui(UiAction::ToggleTrackArm(track.id())))
+            .effects
+            .remove(0);
+        update(
+            &mut state,
+            if failed_send {
+                Action::RequestFailed(effect.operation)
+            } else {
+                Action::Disconnected
+            },
+        );
+        assert!(!state.connected && !state.arm_request_in_flight);
+        assert!(state.tracks[0].armed);
+        assert!(
+            update(&mut state, Action::Ui(UiAction::ToggleTrackArm(track.id())))
+                .effects
+                .is_empty()
+        );
+        assert!(
+            !update(
+                &mut state,
+                Action::Notification(TinexNotification::ArmTracks(Default::default()))
+            )
+            .changed
+        );
+        assert!(state.tracks[0].armed);
+    }
+}
+
 fn create(state: &mut AppState) -> Track {
     let result = update(state, Action::Ui(UiAction::CreateTrack));
     assert!(result.changed);
@@ -203,7 +343,7 @@ fn level_responses_preserve_navigation_and_widget_identity() {
     let mut state = AppState::default();
     let track = create(&mut state);
     confirm(&mut state, track.id());
-    let open_button = state.tracks[0].open_button;
+    let row = state.tracks[0].row;
     update(&mut state, Action::Ui(UiAction::OpenTrack(track.id())));
     assert_eq!(update(&mut state, Action::SampleLevels).effects.len(), 1);
     update(
@@ -215,7 +355,7 @@ fn level_responses_preserve_navigation_and_widget_identity() {
     );
     assert_eq!(state.page, Page::Track(track.id()));
     assert_eq!(state.tracks[0].output_level, 2.0);
-    assert_eq!(state.tracks[0].open_button, open_button);
+    assert_eq!(state.tracks[0].row, row);
 }
 
 #[test]

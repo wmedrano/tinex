@@ -13,13 +13,16 @@ pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiActi
             surface: true,
         },
         Widget::Row {
-            children: vec![Widget::button(
-                state.add_plugin_button,
-                "Add Plugin",
-                144.0,
-                state.connected && !track.deleting,
-                UiAction::OpenPlugins(track.id),
-            )],
+            children: vec![
+                Widget::button(
+                    state.add_plugin_button,
+                    "Add Plugin",
+                    144.0,
+                    state.connected && !track.deleting,
+                    UiAction::OpenPlugins(track.id),
+                ),
+                super::track_arm_control(state, track),
+            ],
             surface: false,
         },
         Widget::label("Plugins", Tone::Normal),

@@ -82,6 +82,8 @@ pub enum Widget<A> {
         label: String,
         width: f64,
         enabled: bool,
+        /// Persistent selection, independent of hover, press, or focus.
+        selected: bool,
         action: A,
     },
     Label {
@@ -136,6 +138,25 @@ impl<A> Widget<A> {
             label: label.into(),
             width,
             enabled,
+            selected: false,
+            action,
+        }
+    }
+
+    pub fn toggle_button(
+        id: WidgetId,
+        label: impl Into<String>,
+        width: f64,
+        enabled: bool,
+        selected: bool,
+        action: A,
+    ) -> Self {
+        Self::Button {
+            id,
+            label: label.into(),
+            width,
+            enabled,
+            selected,
             action,
         }
     }
@@ -228,6 +249,10 @@ pub struct WidgetStyle {
     pub error: Color,
     pub surface: Color,
     pub button: Color,
+    pub selected_button: Color,
+    pub selected_hovered: Color,
+    pub selected_pressed: Color,
+    pub selected_disabled: Color,
     pub hovered: Color,
     pub pressed: Color,
     pub disabled: Color,
@@ -295,6 +320,7 @@ enum ItemKind<A> {
         // instead of a label, with a surface-colored idle background.
         label: Option<String>,
         enabled: bool,
+        selected: bool,
         action: A,
     },
 }
@@ -768,11 +794,25 @@ impl<A: Clone> Ui<A> {
                 }
                 ItemKind::LevelMeter(meter) => meter.render(scene, item.rect, scale, &style.meter),
                 ItemKind::Button {
-                    id, label, enabled, ..
+                    id,
+                    label,
+                    enabled,
+                    selected,
+                    ..
                 } => {
                     let pressed = (self.captured == Some(*id) && self.hovered == Some(*id))
                         || self.key_pressed.is_some_and(|(held, _)| held == *id);
-                    let color = if !enabled {
+                    let color = if *selected {
+                        if !enabled {
+                            style.selected_disabled
+                        } else if pressed {
+                            style.selected_pressed
+                        } else if self.hovered == Some(*id) {
+                            style.selected_hovered
+                        } else {
+                            style.selected_button
+                        }
+                    } else if !enabled {
                         style.disabled
                     } else if pressed {
                         style.pressed
@@ -890,6 +930,7 @@ fn layout<A: Clone>(
             id,
             label,
             enabled,
+            selected,
             action,
             ..
         } => items.push(Item {
@@ -900,6 +941,7 @@ fn layout<A: Clone>(
                 id: *id,
                 label: Some(label.clone()),
                 enabled: *enabled,
+                selected: *selected,
                 action: action.clone(),
             },
         }),
@@ -950,6 +992,7 @@ fn layout<A: Clone>(
                     id: *id,
                     label: None,
                     enabled: *enabled,
+                    selected: false,
                     action: action.clone(),
                 }),
                 _ => None,

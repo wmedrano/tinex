@@ -26,28 +26,32 @@ pub(super) fn main_view(state: &AppState) -> Vec<Widget<UiAction>> {
             .map(|track| {
                 Widget::clickable_row(
                     track.row,
-                    vec![
-                        Widget::label(&track.name, Tone::Normal),
-                        super::track_volume_control(state, track, 144.0),
-                        Widget::button(
-                            track.open_button,
-                            "Open",
-                            72.0,
-                            true,
-                            UiAction::OpenTrack(track.id),
-                        ),
-                        Widget::button(
-                            track.delete_button,
-                            if track.deleting {
-                                "Deleting…"
-                            } else {
-                                "Delete"
-                            },
-                            112.0,
-                            state.connected && !track.deleting,
-                            UiAction::DeleteTrack(track.id),
-                        ),
-                    ],
+                    vec![Widget::Column(vec![
+                        Widget::Row {
+                            children: vec![
+                                Widget::label(&track.name, Tone::Normal),
+                                super::track_volume_control(state, track, 144.0),
+                            ],
+                            surface: false,
+                        },
+                        Widget::Row {
+                            children: vec![
+                                super::track_arm_control(state, track),
+                                Widget::button(
+                                    track.delete_button,
+                                    if track.deleting {
+                                        "Deleting…"
+                                    } else {
+                                        "Delete"
+                                    },
+                                    112.0,
+                                    state.connected && !track.deleting,
+                                    UiAction::DeleteTrack(track.id),
+                                ),
+                            ],
+                            surface: false,
+                        },
+                    ])],
                     true,
                     UiAction::OpenTrack(track.id),
                 )

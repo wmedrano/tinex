@@ -18,6 +18,37 @@ pub(super) struct Update {
 pub(super) fn update(state: &mut AppState, action: Action) -> Update {
     let mut result = Update::default();
     match action {
+        Action::Ui(UiAction::ToggleTrackArm(id))
+            if state.connected && !state.arm_request_in_flight =>
+        {
+            if let Some(track) = state
+                .tracks
+                .iter()
+                .find(|track| track.id == id && !track.deleting)
+            {
+                let tracks = if track.armed {
+                    Default::default()
+                } else {
+                    [id].into()
+                };
+                result.effects.push(Effect {
+                    request: TinexRequest::ArmTracks(tracks),
+                    operation: Operation::ArmTracks,
+                });
+                state.arm_request_in_flight = true;
+                state.message = None;
+                result.changed = true;
+            }
+        }
+        Action::Notification(TinexNotification::ArmTracks(tracks)) if state.connected => {
+            result.changed = state.arm_request_in_flight;
+            state.arm_request_in_flight = false;
+            for track in &mut state.tracks {
+                let armed = tracks.contains(&track.id);
+                result.changed |= track.armed != armed;
+                track.armed = armed;
+            }
+        }
         Action::Ui(UiAction::SetTrackVolume { track_id, db })
             if state.connected && db.is_finite() =>
         {
@@ -172,8 +203,9 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     name: pending.name,
                     number: pending.number,
                     row: WidgetId::new(),
-                    open_button: WidgetId::new(),
                     delete_button: WidgetId::new(),
+                    arm_button: WidgetId::new(),
+                    armed: false,
                     volume_slider: WidgetId::new(),
                     volume_db: 0.0,
                     deleting: false,
@@ -226,7 +258,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 Operation::Create(id) => {
                     state.pending.remove(&id);
                 }
-                Operation::SampleLevels | Operation::AddPlugin => {}
+                Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
                 Operation::Delete(id) => {
                     if let Some(row) = state.tracks.iter_mut().find(|row| row.id == id) {
                         row.deleting = false;
@@ -242,6 +274,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             result.changed = true;
         }
         Action::Notification(TinexNotification::OutputLevel { .. })
+        | Action::Notification(TinexNotification::ArmTracks(_))
         | Action::SampleLevels
         | Action::Ui(_)
         | Action::Disconnected => {}
@@ -253,6 +286,7 @@ fn disconnect(state: &mut AppState) {
     state.connected = false;
     state.pending.clear();
     state.level_request_in_flight = false;
+    state.arm_request_in_flight = false;
     state.level_request_buffer.clear();
     state.master_output_level = 0.0;
     state.cpu_load = None;

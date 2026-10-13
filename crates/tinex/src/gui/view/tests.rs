@@ -4,6 +4,280 @@ use tinex_widgets::TextRenderer;
 use vello::Scene;
 use vello::kurbo::Size;
 
+fn confirmed_tracks(count: usize) -> AppState {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    let mut state = AppState::default();
+    for _ in 0..count {
+        let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
+            .effects
+            .remove(0);
+        let TinexRequest::NewTrack(track) = effect.request else {
+            panic!("expected track")
+        };
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::TrackCreated(track.id())),
+        );
+    }
+    state
+}
+
+fn arm_buttons(widget: &Widget<UiAction>) -> Vec<(&str, bool, tinex_widgets::WidgetId, bool)> {
+    match widget {
+        Widget::Button {
+            id,
+            label,
+            enabled,
+            selected,
+            action: UiAction::ToggleTrackArm(_),
+            ..
+        } => {
+            vec![(label.as_str(), *enabled, *id, *selected)]
+        }
+        Widget::Row { children, .. }
+        | Widget::ClickableRow { children, .. }
+        | Widget::Column(children)
+        | Widget::StatusBar(children) => children.iter().flat_map(arm_buttons).collect(),
+        Widget::Scroll { child, .. } => arm_buttons(child),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn armed_button_color_remains_distinct_when_hovered_pressed_or_disabled() {
+    use tinex_widgets::{Input, Ui};
+    use vello::kurbo::Point;
+
+    let mut state = confirmed_tracks(1);
+    let theme = Theme::default();
+    let mut text = TextRenderer::new();
+    for (enabled, hovered, pressed) in [
+        (true, false, false),
+        (true, true, false),
+        (true, true, true),
+        (false, true, false),
+    ] {
+        state.arm_request_in_flight = !enabled;
+        let mut paints = Vec::new();
+        for armed in [false, true] {
+            state.tracks[0].armed = armed;
+            let control = track_arm_control(&state, &state.tracks[0]);
+            assert_eq!(arm_buttons(&control)[0].0, "Arm");
+            let mut ui = Ui::new(control, Size::new(400.0, 280.0));
+            if hovered {
+                ui.input(Input::PointerMoved(Point::new(50.0, 34.0)));
+            }
+            if pressed {
+                ui.input(Input::PointerPressed);
+            }
+            let mut scene = Scene::new();
+            ui.render(&mut scene, &mut text, &theme.widgets, 1.0);
+            paints.push(scene.encoding().draw_data.clone());
+        }
+        assert_ne!(
+            paints[0], paints[1],
+            "armed color lost for enabled={enabled}, hovered={hovered}, pressed={pressed}"
+        );
+    }
+}
+
+#[test]
+fn arm_controls_support_pointer_keyboard_confirmation_and_disabled_precedence() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    use tinex_widgets::{ActivationKey, Input, Ui};
+    use vello::kurbo::Point;
+
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        for scale in [1.0, 2.0] {
+            for main_page in [true, false] {
+                let mut state = confirmed_tracks(2);
+                let id = state.tracks[0].id;
+                let button = state.tracks[0].arm_button;
+                let (page, point, tabs) = if main_page {
+                    (Page::Main, Point::new(76.0, 194.0), 4)
+                } else {
+                    (Page::Track(id), Point::new(220.0, 186.0), 4)
+                };
+                state.page = page;
+                update(
+                    &mut state,
+                    Action::Notification(TinexNotification::ArmTracks(Default::default())),
+                );
+                let mut ui = Ui::new(view(&state), size);
+                let physical = Point::new(point.x * scale, point.y * scale);
+                let logical = Point::new(physical.x / scale, physical.y / scale);
+                ui.input(Input::PointerMoved(logical));
+                ui.input(Input::PointerPressed);
+                let actions = ui.input(Input::PointerReleased);
+                assert!(
+                    matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
+                );
+                let result = update(&mut state, Action::Ui(actions[0]));
+                assert!(
+                    matches!(&result.effects[0].request, TinexRequest::ArmTracks(ids) if *ids == [id].into())
+                );
+                assert_eq!(state.page, page);
+                assert!(!state.tracks[0].armed);
+                assert!(
+                    arm_buttons(&view(&state))
+                        .iter()
+                        .all(|(label, enabled, _, selected)| *label == "Arm"
+                            && !enabled
+                            && !selected)
+                );
+                ui.set_view(view(&state), size);
+                ui.input(Input::PointerPressed);
+                assert!(ui.input(Input::PointerReleased).is_empty());
+
+                update(
+                    &mut state,
+                    Action::Notification(TinexNotification::ArmTracks([id].into())),
+                );
+                assert_eq!(arm_buttons(&view(&state))[0], ("Arm", true, button, true));
+                ui.set_view(view(&state), size);
+                // Both activation keys reach the arm control through Tab navigation.
+                for key in [ActivationKey::Enter, ActivationKey::Space] {
+                    ui.input(Input::Cancel);
+                    for _ in 0..tabs {
+                        ui.input(Input::Tab { backwards: false });
+                    }
+                    ui.input(Input::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                    });
+                    let actions = ui.input(Input::Key {
+                        key,
+                        pressed: false,
+                        repeat: false,
+                    });
+                    assert!(
+                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
+                    );
+                    let result = update(&mut state, Action::Ui(actions[0]));
+                    assert!(
+                        matches!(&result.effects[0].request, TinexRequest::ArmTracks(ids) if ids.is_empty())
+                    );
+                    assert!(state.tracks[0].armed);
+                    update(
+                        &mut state,
+                        Action::Notification(TinexNotification::ArmTracks([id].into())),
+                    );
+                    ui.set_view(view(&state), size);
+                }
+
+                for disconnected in [false, true] {
+                    state.tracks[0].deleting = !disconnected;
+                    if disconnected {
+                        update(&mut state, Action::Disconnected);
+                    }
+                    ui.set_view(view(&state), size);
+                    assert_eq!(arm_buttons(&view(&state))[0], ("Arm", false, button, true));
+                    ui.input(Input::PointerMoved(logical));
+                    ui.input(Input::PointerPressed);
+                    assert!(ui.input(Input::PointerReleased).is_empty());
+                    assert_eq!(state.page, page);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scrolling_track_cards_preserves_the_footer_and_targets_the_visible_track() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::TinexNotification;
+    use tinex_widgets::{ActivationKey, Input, Ui};
+    use vello::kurbo::Point;
+
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        for scale in [1.0, 2.0] {
+            for count in [0, 10] {
+                let mut state = confirmed_tracks(count);
+                let mut ui = Ui::new(view(&state), size);
+                let mut text = TextRenderer::new();
+                let theme = Theme::default();
+                let mut scene = Scene::new();
+                ui.render(&mut scene, &mut text, &theme.widgets, scale);
+                // The final two text runs belong to Master and CPU.
+                let footer: Vec<_> = scene
+                    .encoding()
+                    .resources
+                    .glyph_runs
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|run| run.transform)
+                    .collect();
+                assert_eq!(footer.len(), 2);
+                assert!(
+                    footer.iter().all(|transform| transform.translation[1]
+                        == ((size.height - 26.0) * scale) as f32),
+                    "footer positions: {footer:?}; size: {size:?}; count: {count}"
+                );
+                ui.input(Input::PointerMoved(Point::new(36.0, 100.0)));
+                ui.input(Input::Scroll(10_000.0));
+                ui.set_view(view(&state), size);
+                scene.reset();
+                ui.render(&mut scene, &mut text, &theme.widgets, scale);
+                let scrolled_footer: Vec<_> = scene
+                    .encoding()
+                    .resources
+                    .glyph_runs
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|run| run.transform)
+                    .collect();
+                assert_eq!(scrolled_footer, footer);
+                // Track controls cannot receive clicks through the fixed footer.
+                for x in [1.0, 156.0, size.width - 1.0] {
+                    ui.input(Input::PointerMoved(Point::new(x, size.height - 16.0)));
+                    ui.input(Input::PointerPressed);
+                    assert!(ui.input(Input::PointerReleased).is_empty());
+                }
+                if let Some(track) = state.tracks.last() {
+                    let id = track.id;
+                    let button = track.arm_button;
+                    ui.input(Input::PointerMoved(Point::new(76.0, size.height - 74.0)));
+                    ui.input(Input::PointerPressed);
+                    let actions = ui.input(Input::PointerReleased);
+                    assert!(
+                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
+                    );
+                    update(&mut state, Action::Ui(actions[0]));
+                    update(
+                        &mut state,
+                        Action::Notification(TinexNotification::ArmTracks([id].into())),
+                    );
+                    ui.set_view(view(&state), size);
+                    assert_eq!(
+                        arm_buttons(&view(&state)).last().copied(),
+                        Some(("Arm", true, button, true))
+                    );
+                    // Confirmation rebuilds keep focus and scroll on the same control.
+                    ui.input(Input::Key {
+                        key: ActivationKey::Enter,
+                        pressed: true,
+                        repeat: false,
+                    });
+                    let actions = ui.input(Input::Key {
+                        key: ActivationKey::Enter,
+                        pressed: false,
+                        repeat: false,
+                    });
+                    assert!(
+                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
+                    );
+                    assert_eq!(state.page, Page::Main);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn cpu_meter_is_in_the_shared_footer_on_every_page() {
     use crate::gui::{action::Action, update::update};
@@ -83,7 +357,7 @@ fn confirmed_rows_emit_delete_actions_and_pending_rows_disable_them() {
     };
     let size = Size::new(400.0, 280.0);
     let mut ui = Ui::new(view(&state), size);
-    let delete_position = Point::new(300.0, 100.0);
+    let delete_position = Point::new(184.0, 194.0);
     ui.input(Input::PointerMoved(delete_position));
     ui.input(Input::PointerPressed);
     assert!(ui.input(Input::PointerReleased).is_empty());
@@ -269,8 +543,8 @@ fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
     state.tracks[0].output_level = 2.0;
     ui.set_view(view(&state), size);
 
-    for point in [Point::new(20.0, 100.0), Point::new(230.0, 100.0)] {
-        let actions = click(&mut ui, point); // Track row or Open button.
+    for point in [Point::new(20.0, 100.0), Point::new(300.0, 194.0)] {
+        let actions = click(&mut ui, point); // Track row outside its nested controls.
         assert!(matches!(actions.as_slice(), [UiAction::OpenTrack(id)] if *id == track.id()));
         let result = update(&mut state, Action::Ui(actions[0]));
         assert!(result.changed && result.effects.is_empty());
@@ -337,8 +611,6 @@ fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
     ui.input(Input::Cancel);
     ui.input(Input::Tab { backwards: false }); // Create.
     ui.input(Input::Tab { backwards: false }); // Track row.
-    ui.input(Input::Tab { backwards: false }); // Volume.
-    ui.input(Input::Tab { backwards: false }); // Open button.
     ui.input(Input::Key {
         key: ActivationKey::Enter,
         pressed: true,
@@ -653,7 +925,16 @@ fn combined_meter_displays_post_gain_on_both_pages_and_preserves_stable_ids() {
                 panic!("expected column");
             };
             let children = match &content[0] {
-                Widget::Row { children, .. } | Widget::ClickableRow { children, .. } => children,
+                Widget::Row { children, .. } => children,
+                Widget::ClickableRow { children, .. } => {
+                    let Widget::Column(rows) = &children[0] else {
+                        panic!("expected track card");
+                    };
+                    let Widget::Row { children, .. } = &rows[0] else {
+                        panic!("expected volume row");
+                    };
+                    children
+                }
                 _ => panic!("expected row"),
             };
             let Widget::MeterSlider {
@@ -702,7 +983,7 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
     }
     let first = state.tracks[0].id;
     let second = state.tracks[1].id;
-    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+    for size in [Size::new(400.0, 400.0), Size::new(800.0, 450.0)] {
         for scale in [1.0, 2.0] {
             state.tracks[0].volume_db = 0.0;
             state.tracks[1].volume_db = 0.0;
@@ -718,7 +999,7 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
             assert_eq!(state.page, Page::Main);
             assert_eq!(state.tracks[1].volume_db, 0.0);
             ui.set_view(view(&state), size);
-            let physical = Point::new((size.width - 296.0) * scale, 186.0 * scale);
+            let physical = Point::new((size.width - 176.0) * scale, 270.0 * scale);
             ui.input(Input::PointerMoved(Point::new(
                 physical.x / scale,
                 physical.y / scale,
@@ -752,7 +1033,7 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
             assert_eq!(state.page, Page::Main);
             state.tracks[1].deleting = true;
             ui.set_view(view(&state), size);
-            ui.input(Input::PointerMoved(Point::new(size.width - 296.0, 186.0)));
+            ui.input(Input::PointerMoved(Point::new(size.width - 176.0, 270.0)));
             assert!(ui.input(Input::PointerPressed).is_empty());
             assert!(ui.input(Input::PointerReleased).is_empty());
             assert_eq!(state.page, Page::Main);
@@ -761,7 +1042,7 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
     }
     update(&mut state, Action::Disconnected);
     let mut ui = Ui::new(view(&state), Size::new(400.0, 280.0));
-    ui.input(Input::PointerMoved(Point::new(104.0, 102.0)));
+    ui.input(Input::PointerMoved(Point::new(270.0, 110.0)));
     assert!(ui.input(Input::PointerPressed).is_empty());
     assert!(ui.input(Input::PointerReleased).is_empty());
     assert_eq!(state.page, Page::Main);

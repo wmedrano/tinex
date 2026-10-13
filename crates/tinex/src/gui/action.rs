@@ -11,6 +11,7 @@ pub(super) enum UiAction {
     AddPlugin { track_id: TrackId, index: usize },
     BackToMain,
     DeleteTrack(TrackId),
+    ToggleTrackArm(TrackId),
 }
 
 pub(super) enum Action {
@@ -27,6 +28,7 @@ pub(super) enum Operation {
     SetTrackVolume { track_id: TrackId, previous_db: f32 },
     Create(TrackId),
     Delete(TrackId),
+    ArmTracks,
     AddPlugin,
     SampleLevels,
 }

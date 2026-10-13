@@ -75,6 +75,17 @@ fn track_volume_control(state: &AppState, track: &UiTrack, width: f64) -> Widget
     }
 }
 
+fn track_arm_control(state: &AppState, track: &UiTrack) -> Widget<UiAction> {
+    Widget::toggle_button(
+        track.arm_button,
+        "Arm",
+        88.0,
+        state.connected && !track.deleting && !state.arm_request_in_flight,
+        track.armed,
+        UiAction::ToggleTrackArm(track.id),
+    )
+}
+
 fn status(state: &AppState) -> (String, Tone) {
     let mut activity = Vec::new();
     for (verb, count) in [
