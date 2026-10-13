@@ -144,35 +144,10 @@ impl Tinex {
         for channel in args.output.iter_mut() {
             channel.fill(0.0);
         }
+        if self.tracks.is_empty() {
+            return;
+        }
         let worker_count = rayon::current_num_threads();
-        if self.tracks.len() < 2 || worker_count == 1 {
-            self.process_tracks_serial(args);
-        } else {
-            self.process_tracks_parallel(args, worker_count);
-        }
-    }
-
-    fn process_tracks_serial(&mut self, args: &mut ProcessArgs<'_, '_>) {
-        let mut buffers: [_; 4] = std::array::from_fn(|index| {
-            args._arena
-                .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
-        });
-        for track in self.tracks.iter_mut() {
-            let output = track.process(
-                args.midi_input,
-                args.input,
-                buffers.each_mut().map(|buffer| &mut **buffer),
-                args.sample_rate,
-            );
-            for (output, samples) in args.output.iter_mut().zip(output) {
-                for (output, sample) in output.iter_mut().zip(samples.iter()) {
-                    *output += sample;
-                }
-            }
-        }
-    }
-
-    fn process_tracks_parallel(&mut self, args: &mut ProcessArgs<'_, '_>, worker_count: usize) {
         let chunk_size = self.tracks.len().div_ceil(worker_count);
         let chunk_count = self.tracks.len().div_ceil(chunk_size);
         let mut buffers = bumpalo::collections::Vec::with_capacity_in(chunk_count, args._arena);
@@ -210,19 +185,13 @@ impl Tinex {
                         ],
                         sample_rate,
                     );
-                    for (mix, sample) in mix_left.iter_mut().zip(output[0].iter()) {
-                        *mix += sample;
-                    }
-                    for (mix, sample) in mix_right.iter_mut().zip(output[1].iter()) {
-                        *mix += sample;
-                    }
+                    mix(mix_left, output[0]);
+                    mix(mix_right, output[1]);
                 }
             });
         for buffers in buffers.iter() {
-            for (output, mix) in args.output.iter_mut().zip(&buffers[4..]) {
-                for (output, sample) in output.iter_mut().zip(mix.iter()) {
-                    *output += sample;
-                }
+            for (output, source) in args.output.iter_mut().zip(&buffers[4..]) {
+                mix(output, source);
             }
         }
     }
@@ -243,6 +212,12 @@ impl Tinex {
             self.output_level += (f64::from(output_level) - self.output_level)
                 * output_level_weight(frames, args.sample_rate);
         }
+    }
+}
+
+fn mix(dst: &mut [f32], src: &[f32]) {
+    for (dst, src) in dst.iter_mut().zip(src.iter()) {
+        *dst += *src;
     }
 }
 
