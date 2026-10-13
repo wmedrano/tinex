@@ -95,11 +95,9 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
         }
         Action::SampleLevels if state.connected && !state.level_request_in_flight => {
             let mut tracks = std::mem::take(&mut state.level_request_buffer);
-            tracks.retain(|id, _| state.tracks.iter().any(|row| row.id == *id));
-            // Grow/populate on the GUI thread, not in the audio callback.
-            tracks.reserve(state.tracks.len().saturating_sub(tracks.len()));
-            for row in &state.tracks {
-                tracks.insert(row.id, 0.0);
+            tracks.clear();
+            for track in state.tracks.iter() {
+                tracks.insert(track.id, 0.0);
             }
             state.level_request_in_flight = true;
             result.effects.push(Effect {

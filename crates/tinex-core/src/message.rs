@@ -7,7 +7,8 @@ use crate::{
 
 pub enum TinexRequest {
     /// Updates the supplied track entries with exponentially weighted block peak levels.
-    /// Missing tracks receive zero; the response returns the same map allocation.
+    /// Entries for unknown tracks are left untouched; the response returns the same map
+    /// allocation.
     OutputLevel(HashMap<TrackId, f32>),
     NewTrack(Track),
     DeleteTrack(TrackId),

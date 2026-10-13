@@ -63,12 +63,10 @@ impl Tinex {
         for request in self.requests.try_iter() {
             match request {
                 TinexRequest::OutputLevel(mut tracks) => {
-                    for (id, level) in tracks.iter_mut() {
-                        *level = self
-                            .tracks
-                            .iter()
-                            .find(|track| track.id() == *id)
-                            .map_or(0.0, Track::output_level);
+                    for track in self.tracks.iter_mut() {
+                        if let Some(level) = tracks.get_mut(&track.id()) {
+                            *level = track.output_level();
+                        }
                     }
                     let _ = self.notifications.send(TinexNotification::OutputLevel {
                         output_level: self.output_level as f32,
@@ -449,7 +447,8 @@ mod tests {
             assert!((output_level - expected * 1.75).abs() < 1e-6);
             assert!((tracks[&ids[0]] - expected).abs() < 1e-6);
             assert!((tracks[&ids[1]] - expected * 0.5).abs() < 1e-6);
-            assert_eq!(tracks[&missing], 0.0);
+            // Unknown ids are left untouched rather than zeroed.
+            assert_eq!(tracks[&missing], -1.0);
             assert!(!tracks.contains_key(&ids[2]));
             assert_eq!(tracks.len(), 3);
             assert_eq!(tracks.capacity(), capacity);
@@ -460,6 +459,7 @@ mod tests {
         }
 
         // Deletion is handled before the following level request.
+        let deleted_level = tracks[&ids[0]];
         sender.send(TinexRequest::DeleteTrack(ids[0])).unwrap();
         sender.send(TinexRequest::OutputLevel(tracks)).unwrap();
         tinex.process(ProcessArgs {
@@ -476,7 +476,8 @@ mod tests {
         let TinexNotification::OutputLevel { tracks, .. } = received.try_recv().unwrap() else {
             panic!("expected output levels");
         };
-        assert_eq!(tracks[&ids[0]], 0.0);
+        // A deleted track keeps its last reported level; only live tracks are updated.
+        assert_eq!(tracks[&ids[0]], deleted_level);
     }
 
     #[test]
@@ -494,11 +495,12 @@ mod tests {
             .send(TinexRequest::OutputLevel(HashMap::from([(id, -1.0)])))
             .unwrap();
         let notifications = process(&mut tinex, &received);
+        // The first request precedes creation, so its placeholder survives untouched.
         assert!(matches!(notifications.as_slice(), [
             TinexNotification::OutputLevel { tracks: before, .. },
             TinexNotification::TrackCreated(created),
             TinexNotification::OutputLevel { tracks: after, .. },
-        ] if before[&id] == 0.0 && *created == id && after[&id] == 0.0));
+        ] if before[&id] == -1.0 && *created == id && after[&id] == 0.0));
     }
 
     #[test]
