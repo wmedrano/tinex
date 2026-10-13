@@ -10,6 +10,7 @@ pub enum TinexRequest {
     /// Entries for unknown tracks are left untouched; the response returns the same map
     /// allocation.
     OutputLevel(HashMap<TrackId, f32>),
+    SetTrackVolume(TrackId, f32),
     NewTrack(Track),
     DeleteTrack(TrackId),
     AddPlugin {

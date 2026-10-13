@@ -73,6 +73,12 @@ impl Tinex {
                         tracks,
                     });
                 }
+                TinexRequest::SetTrackVolume(track_id, volume) => {
+                    let Some(track) = self.tracks.iter_mut().find(|t| t.id() == track_id) else {
+                        continue;
+                    };
+                    track.volume = volume;
+                }
                 TinexRequest::NewTrack(track) => {
                     // Zero-sized tracks give Vec a capacity of usize::MAX.
                     if self.tracks.len() >= self.tracks.capacity().min(TRACK_CAPACITY) {
@@ -152,8 +158,8 @@ impl Tinex {
                         ],
                         sample_rate,
                     );
-                    mix(mix_left, output[0]);
-                    mix(mix_right, output[1]);
+                    mix_with_volume(mix_left, output[0], track.volume);
+                    mix_with_volume(mix_right, output[1], track.volume);
                 }
             });
         for buffers in buffers.iter() {
@@ -179,6 +185,12 @@ impl Tinex {
             self.output_level += (f64::from(output_level) - self.output_level)
                 * output_level_weight(frames, args.sample_rate);
         }
+    }
+}
+
+fn mix_with_volume(dst: &mut [f32], src: &[f32], volume: f32) {
+    for (dst, src) in dst.iter_mut().zip(src.iter()) {
+        *dst += volume * *src;
     }
 }
 
@@ -628,6 +640,127 @@ mod tests {
         ));
         assert_eq!(tinex.tracks.len(), 1);
         assert_eq!(tinex.tracks[0].id(), ids[1]);
+    }
+
+    /// Renders one two-frame silent-input block and returns the first sample per channel.
+    fn render(tinex: &mut Tinex, arena: &bumpalo::Bump) -> (f32, f32) {
+        let mut left = [99.0; 2];
+        let mut right = [99.0; 2];
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &[],
+            output: [&mut left, &mut right],
+            _arena: arena,
+        });
+        (left[0], right[0])
+    }
+
+    #[test]
+    fn volume_scales_only_the_contribution_of_its_own_track() {
+        struct Fill(f32);
+
+        impl plugin::Plugin for Fill {
+            fn process(
+                &mut self,
+                _: &[(usize, MidiMessage)],
+                _: [&[f32]; 2],
+                output: [&mut [f32]; 2],
+            ) {
+                for (index, channel) in output.into_iter().enumerate() {
+                    channel.fill(self.0 * (index as f32 + 1.0));
+                }
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        let first = Track::with_plugin(Fill(0.5));
+        let first_id = first.id();
+        let second = Track::with_plugin(Fill(0.125));
+        let second_id = second.id();
+        sender.send(TinexRequest::NewTrack(first)).unwrap();
+        sender.send(TinexRequest::NewTrack(second)).unwrap();
+
+        let arena = bumpalo::Bump::new();
+
+        // New tracks mix at unity gain and volume changes notify nobody.
+        assert_eq!(render(&mut tinex, &arena), (0.625, 1.25));
+        assert_eq!(received.try_iter().count(), 2);
+        for (volume, expected) in [
+            (0.5, (0.375, 0.75)),
+            (0.0, (0.125, 0.25)),
+            (2.0, (1.125, 2.25)),
+        ] {
+            sender
+                .send(TinexRequest::SetTrackVolume(first_id, volume))
+                .unwrap();
+            assert_eq!(render(&mut tinex, &arena), expected, "volume {volume}");
+        }
+        assert_eq!(received.try_iter().count(), 0);
+
+        // Volumes are per track and stick across blocks.
+        sender
+            .send(TinexRequest::SetTrackVolume(second_id, 0.5))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (1.0625, 2.125));
+    }
+
+    #[test]
+    fn volume_targets_tracks_by_id_and_ignores_unknown_ids() {
+        struct Tone(f32);
+
+        impl plugin::Plugin for Tone {
+            fn process(
+                &mut self,
+                _: &[(usize, MidiMessage)],
+                _: [&[f32]; 2],
+                output: [&mut [f32]; 2],
+            ) {
+                for channel in output {
+                    channel.fill(self.0);
+                }
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        let tracks = [
+            Track::with_plugin(Tone(0.25)),
+            Track::with_plugin(Tone(0.125)),
+            Track::with_plugin(Tone(0.0625)),
+        ];
+        let ids = tracks.each_ref().map(Track::id);
+        let future = Track::with_plugin(Tone(0.5));
+        let future_id = future.id();
+        let unknown = TrackId::new();
+        for track in tracks {
+            sender.send(TinexRequest::NewTrack(track)).unwrap();
+        }
+        // Volumes are not remembered per id: a track mixes at unity until it exists
+        // and is turned down.
+        sender
+            .send(TinexRequest::SetTrackVolume(unknown, 0.0))
+            .unwrap();
+        sender
+            .send(TinexRequest::SetTrackVolume(future_id, 0.0))
+            .unwrap();
+        sender.send(TinexRequest::NewTrack(future)).unwrap();
+        let arena = bumpalo::Bump::new();
+        assert_eq!(render(&mut tinex, &arena), (0.9375, 0.9375));
+
+        // Deleting shifts indices, so volume has to keep addressing by id.
+        sender.send(TinexRequest::DeleteTrack(ids[0])).unwrap();
+        sender
+            .send(TinexRequest::SetTrackVolume(ids[2], 0.0))
+            .unwrap();
+        sender
+            .send(TinexRequest::SetTrackVolume(unknown, 0.5))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (0.625, 0.625));
+        assert_eq!(received.try_iter().count(), 5);
     }
 
     #[test]

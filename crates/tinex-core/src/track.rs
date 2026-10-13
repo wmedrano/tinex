@@ -7,6 +7,7 @@ use super::{id::Id, output_level_weight};
 pub type TrackId = Id<Track>;
 
 pub struct Track {
+    pub volume: f32,
     id: TrackId,
     output_level: f64,
     plugins: Vec<PluginInstance>,
@@ -25,6 +26,7 @@ impl std::fmt::Debug for Track {
 impl Track {
     pub fn new() -> Self {
         Self {
+            volume: 1.0,
             id: Id::new(),
             output_level: 0.0,
             plugins: Vec::with_capacity(8),
