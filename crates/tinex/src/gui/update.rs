@@ -92,14 +92,19 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 state.page = Page::Track(id);
             }
         }
-        Action::Ui(UiAction::OpenPlugins(id)) if state.connected => {
-            if state.tracks.iter().any(|row| row.id == id && !row.deleting) {
-                result.changed = state.page != Page::Plugins(id);
-                state.page = Page::Plugins(id);
+        Action::Ui(UiAction::OpenPlugins { track_id, index }) if state.connected => {
+            if state
+                .tracks
+                .iter()
+                .any(|row| row.id == track_id && !row.deleting)
+            {
+                result.changed = state.page != Page::Plugins(track_id, index);
+                state.page = Page::Plugins(track_id, index);
             }
         }
         Action::Ui(UiAction::AddPlugin { track_id, index }) if state.connected => {
-            if state.page == Page::Plugins(track_id)
+            if let Page::Plugins(id, insertion_index) = state.page
+                && id == track_id
                 && state
                     .tracks
                     .iter()
@@ -109,7 +114,11 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 let plugin = builder.build(state.sample_rate);
                 let plugin_id = plugin.id();
                 result.effects.push(Effect {
-                    request: TinexRequest::AddPlugin { track_id, plugin },
+                    request: TinexRequest::AddPlugin {
+                        track_id,
+                        plugin,
+                        index: insertion_index,
+                    },
                     operation: Operation::AddPlugin,
                 });
                 state
@@ -124,6 +133,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                             id: plugin_id,
                             name: builder.name(),
                             delete_button: WidgetId::new(),
+                            insert_before_button: WidgetId::new(),
                             deleting: false,
                         },
                     );
@@ -258,16 +268,21 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             state.tracks.retain(|row| row.id != track.id());
             state.level_request_buffer.remove(&track.id());
             result.changed = state.tracks.len() != count;
-            if matches!(state.page, Page::Track(id) | Page::Plugins(id) if id == track.id()) {
+            if matches!(state.page, Page::Track(id) | Page::Plugins(id, _) if id == track.id()) {
                 state.page = Page::Main;
                 result.changed = true;
             }
         }
-        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)) => {
+        Action::Notification(TinexNotification::PluginAdded {
+            track_id,
+            plugin_id,
+            index,
+        }) => {
             if let Some(row) = state.tracks.iter_mut().find(|row| row.id == track_id)
                 && let Some(plugin) = row.pending_plugins.remove(&plugin_id)
             {
-                row.plugins.push(plugin);
+                row.plugins
+                    .insert(usize::from(index).min(row.plugins.len()), plugin);
                 result.changed = true;
             }
         }

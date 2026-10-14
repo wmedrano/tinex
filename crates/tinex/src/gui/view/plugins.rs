@@ -3,7 +3,12 @@ use tinex_widgets::{Tone, Widget};
 use super::super::action::UiAction;
 use super::super::state::{AppState, UiTrack};
 
-pub(super) fn plugin_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiAction>> {
+pub(super) fn plugin_view(state: &AppState, track: &UiTrack, index: u16) -> Vec<Widget<UiAction>> {
+    let title = if usize::from(index) < track.plugins.len() {
+        "Insert Plugin"
+    } else {
+        "Add Plugin"
+    };
     vec![
         Widget::Row {
             children: vec![
@@ -14,7 +19,7 @@ pub(super) fn plugin_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiAct
                     true,
                     UiAction::OpenTrack(track.id),
                 ),
-                Widget::label(format!("Add Plugin · {}", track.name), Tone::Normal),
+                Widget::label(format!("{title} · {}", track.name), Tone::Normal),
             ],
             surface: false,
         },

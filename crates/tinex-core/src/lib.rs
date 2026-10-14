@@ -106,14 +106,20 @@ impl Tinex {
                         .notifications
                         .send(TinexNotification::ArmTracks(track_ids));
                 }
-                TinexRequest::AddPlugin { track_id, plugin } => {
+                TinexRequest::AddPlugin {
+                    track_id,
+                    plugin,
+                    index,
+                } => {
                     if let Some(track) = self.tracks.iter_mut().find(|track| track.id() == track_id)
                     {
                         let plugin_id = plugin.id();
-                        track.push_plugin(plugin);
-                        let _ = self
-                            .notifications
-                            .send(TinexNotification::PluginAdded(track_id, plugin_id));
+                        let index = track.insert_plugin(index, plugin);
+                        let _ = self.notifications.send(TinexNotification::PluginAdded {
+                            track_id,
+                            plugin_id,
+                            index,
+                        });
                     }
                 }
                 TinexRequest::DeletePlugin(track_id, plugin_instance_id) => {
@@ -720,6 +726,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn adding_plugins_inserts_in_chain_order_and_confirms_actual_positions() {
+        for (requested, actual, expected) in [
+            (0, 0, 4.0),
+            (1, 1, 12.0),
+            (2, 2, 10.0),
+            (7, 2, 10.0),
+            (u16::MAX, 2, 10.0),
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            let (notifications, received) = mpsc::channel();
+            let mut tinex = Tinex::new(receiver, notifications).unwrap();
+            let mut target = Track::with_plugin(PluginTransform {
+                gain: 0.0,
+                offset: 1.0,
+            });
+            target.push_plugin(plugin::PluginInstance::new(Box::new(PluginTransform {
+                gain: 2.0,
+                offset: 0.0,
+            })));
+            let target_id = target.id();
+            let other = Track::with_plugin(PluginTransform {
+                gain: 0.0,
+                offset: 2.0,
+            });
+            sender.send(TinexRequest::NewTrack(target)).unwrap();
+            sender.send(TinexRequest::NewTrack(other)).unwrap();
+            let arena = bumpalo::Bump::new();
+            assert_eq!(render(&mut tinex, &arena), (4.0, 4.0));
+            assert_eq!(received.try_iter().count(), 2);
+
+            let plugin = plugin::PluginInstance::new(Box::new(PluginTransform {
+                gain: 3.0,
+                offset: 2.0,
+            }));
+            let plugin_id = plugin.id();
+            sender
+                .send(TinexRequest::AddPlugin {
+                    track_id: target_id,
+                    plugin,
+                    index: requested,
+                })
+                .unwrap();
+            assert_eq!(render(&mut tinex, &arena), (expected, expected));
+            assert!(matches!(received.try_iter().collect::<Vec<_>>().as_slice(),
+                [TinexNotification::PluginAdded { track_id, plugin_id: id, index }]
+                if *track_id == target_id && *id == plugin_id && *index == actual));
+        }
+    }
+
+    #[test]
+    fn adding_to_empty_track_confirms_zero_and_unknown_track_is_ignored() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let track = Track::new();
+        let track_id = track.id();
+        sender.send(TinexRequest::NewTrack(track)).unwrap();
+        process(&mut tinex, &received);
+        let plugin = plugin::PluginInstance::new(Box::new(plugin::Silence));
+        let plugin_id = plugin.id();
+        sender
+            .send(TinexRequest::AddPlugin {
+                track_id,
+                plugin,
+                index: u16::MAX,
+            })
+            .unwrap();
+        assert!(matches!(process(&mut tinex, &received).as_slice(),
+            [TinexNotification::PluginAdded { track_id: id, plugin_id: instance, index: 0 }]
+            if *id == track_id && *instance == plugin_id));
+        sender
+            .send(TinexRequest::AddPlugin {
+                track_id: TrackId::new(),
+                plugin: plugin::PluginInstance::new(Box::new(plugin::Silence)),
+                index: 0,
+            })
+            .unwrap();
+        assert!(process(&mut tinex, &received).is_empty());
     }
 
     #[test]

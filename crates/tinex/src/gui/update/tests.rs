@@ -510,7 +510,13 @@ fn add_confirmed_plugin(
     state: &mut AppState,
     track_id: TrackId,
 ) -> tinex_core::plugin::PluginInstance {
-    update(state, Action::Ui(UiAction::OpenPlugins(track_id)));
+    update(
+        state,
+        Action::Ui(UiAction::OpenPlugins {
+            track_id,
+            index: u16::MAX,
+        }),
+    );
     let effect = update(
         state,
         Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
@@ -520,11 +526,170 @@ fn add_confirmed_plugin(
     let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
         panic!("expected plugin addition")
     };
+    let index = state
+        .tracks
+        .iter()
+        .find(|track| track.id == track_id)
+        .unwrap()
+        .plugins
+        .len() as u16;
     update(
         state,
-        Action::Notification(TinexNotification::PluginAdded(track_id, plugin.id())),
+        Action::Notification(TinexNotification::PluginAdded {
+            track_id,
+            plugin_id: plugin.id(),
+            index,
+        }),
     );
     plugin
+}
+
+#[test]
+fn plugin_additions_use_selected_positions_and_match_confirmations_by_id() {
+    let mut state = AppState::default();
+    let first = create(&mut state);
+    let second = create(&mut state);
+    confirm(&mut state, first.id());
+    confirm(&mut state, second.id());
+    add_confirmed_plugin(&mut state, first.id());
+    add_confirmed_plugin(&mut state, first.id());
+    let before = state.tracks[0].plugins.clone();
+    let mut pending = Vec::new();
+    for (position, choice) in [(1, 4), (0, 0)] {
+        update(
+            &mut state,
+            Action::Ui(UiAction::OpenPlugins {
+                track_id: first.id(),
+                index: position,
+            }),
+        );
+        assert_eq!(state.page, Page::Plugins(first.id(), position));
+        let result = update(
+            &mut state,
+            Action::Ui(UiAction::AddPlugin {
+                track_id: first.id(),
+                index: choice,
+            }),
+        );
+        let effect = result.effects.into_iter().next().unwrap();
+        let TinexRequest::AddPlugin {
+            track_id,
+            plugin,
+            index,
+        } = effect.request
+        else {
+            panic!("expected plugin addition")
+        };
+        assert_eq!(track_id, first.id());
+        assert_eq!(index, position);
+        pending.push(state.tracks[0].pending_plugins[&plugin.id()].clone());
+        assert_eq!(state.page, Page::Track(first.id()));
+        assert_eq!(state.tracks[0].plugins, before);
+    }
+    for (track_id, plugin_id) in [
+        (TrackId::new(), pending[0].id),
+        (second.id(), pending[0].id),
+        (first.id(), tinex_core::plugin::PluginInstanceId::new()),
+    ] {
+        assert!(
+            !update(
+                &mut state,
+                Action::Notification(TinexNotification::PluginAdded {
+                    track_id,
+                    plugin_id,
+                    index: 0
+                })
+            )
+            .changed
+        );
+    }
+    assert_eq!(state.tracks[0].pending_plugins.len(), 2);
+    // Confirm by instance id and actual engine position, even if it differs
+    // from the requested position or pending request order.
+    for (plugin_id, index) in [(pending[1].id, 2), (pending[0].id, 1)] {
+        assert!(
+            update(
+                &mut state,
+                Action::Notification(TinexNotification::PluginAdded {
+                    track_id: first.id(),
+                    plugin_id,
+                    index
+                })
+            )
+            .changed
+        );
+        assert!(
+            !update(
+                &mut state,
+                Action::Notification(TinexNotification::PluginAdded {
+                    track_id: first.id(),
+                    plugin_id,
+                    index
+                })
+            )
+            .changed
+        );
+    }
+    assert_eq!(
+        state.tracks[0].plugins,
+        [
+            before[0].clone(),
+            pending[0].clone(),
+            before[1].clone(),
+            pending[1].clone()
+        ]
+    );
+    assert!(state.tracks[0].pending_plugins.is_empty());
+    assert!(state.tracks[1].plugins.is_empty());
+}
+
+#[test]
+fn failed_insertions_clear_pending_plugins_and_preserve_the_confirmed_chain() {
+    for failed_send in [false, true] {
+        let mut state = AppState::default();
+        let track = create(&mut state);
+        confirm(&mut state, track.id());
+        add_confirmed_plugin(&mut state, track.id());
+        let before = state.tracks[0].plugins.clone();
+        update(
+            &mut state,
+            Action::Ui(UiAction::OpenPlugins {
+                track_id: track.id(),
+                index: 0,
+            }),
+        );
+        let effect = update(
+            &mut state,
+            Action::Ui(UiAction::AddPlugin {
+                track_id: track.id(),
+                index: 4,
+            }),
+        )
+        .effects
+        .remove(0);
+        assert_eq!(state.tracks[0].pending_plugins.len(), 1);
+        update(
+            &mut state,
+            if failed_send {
+                Action::RequestFailed(effect.operation)
+            } else {
+                Action::Disconnected
+            },
+        );
+        assert!(!state.connected);
+        assert!(state.tracks[0].pending_plugins.is_empty());
+        assert_eq!(state.tracks[0].plugins, before);
+        assert!(
+            !update(
+                &mut state,
+                Action::Ui(UiAction::OpenPlugins {
+                    track_id: track.id(),
+                    index: 0,
+                })
+            )
+            .changed
+        );
+    }
 }
 
 #[test]

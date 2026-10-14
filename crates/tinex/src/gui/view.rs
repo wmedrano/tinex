@@ -20,13 +20,13 @@ pub(super) fn view(state: &AppState) -> Widget<UiAction> {
                 || main::main_view(state),
                 |row| track::track_view(state, row),
             ),
-        Page::Plugins(id) => state
+        Page::Plugins(id, index) => state
             .tracks
             .iter()
             .find(|track| track.id == id)
             .map_or_else(
                 || main::main_view(state),
-                |row| plugins::plugin_view(state, row),
+                |row| plugins::plugin_view(state, row, index),
             ),
     };
     let (status, tone) = status(state);

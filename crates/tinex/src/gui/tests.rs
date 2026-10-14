@@ -168,7 +168,14 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     poll_notifications(&mut state, &receiver);
     let id = state.tracks[0].id;
     for index in [0, 4, 0] {
-        send_actions(&mut state, &sender, UiAction::OpenPlugins(id));
+        send_actions(
+            &mut state,
+            &sender,
+            UiAction::OpenPlugins {
+                track_id: id,
+                index: u16::MAX,
+            },
+        );
         send_actions(
             &mut state,
             &sender,
@@ -227,7 +234,14 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     assert_eq!(content.len(), 6);
     assert!(matches!(page[2], Widget::StatusBar(_)));
 
-    send_actions(&mut state, &sender, UiAction::OpenPlugins(id));
+    send_actions(
+        &mut state,
+        &sender,
+        UiAction::OpenPlugins {
+            track_id: id,
+            index: u16::MAX,
+        },
+    );
     send_actions(
         &mut state,
         &sender,
@@ -658,6 +672,86 @@ fn volume_requests_change_the_audio_mix_without_confirmation() {
 }
 
 #[test]
+fn engine_round_trip_inserts_plugins_at_the_selected_positions() {
+    let (sender, requests) = mpsc::channel();
+    let (notifications, receiver) = mpsc::channel();
+    let mut engine = Tinex::new(requests, notifications).unwrap();
+    let mut state = AppState::default();
+    for _ in 0..2 {
+        send_actions(&mut state, &sender, UiAction::CreateTrack);
+    }
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    let track_id = state.tracks[0].id;
+    // Multiple additions may be queued while the confirmed GUI chain is empty.
+    for (index, choice) in [(u16::MAX, 0), (u16::MAX, 4), (1, 0), (0, 4)] {
+        send_actions(
+            &mut state,
+            &sender,
+            UiAction::OpenPlugins { track_id, index },
+        );
+        send_actions(
+            &mut state,
+            &sender,
+            UiAction::AddPlugin {
+                track_id,
+                index: choice,
+            },
+        );
+        assert!(state.tracks[0].plugins.is_empty());
+    }
+    assert_eq!(state.tracks[0].pending_plugins.len(), 4);
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    assert_eq!(
+        state.tracks[0]
+            .plugins
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect::<Vec<_>>(),
+        ["Delay", "EPiano", "EPiano", "Delay"]
+    );
+    assert!(state.tracks[0].pending_plugins.is_empty());
+    assert!(state.tracks[1].plugins.is_empty());
+
+    // If the chain shrinks while the picker is open, the engine appends and
+    // confirms the resulting index so the GUI continues to match it.
+    let plugin_id = state.tracks[0].plugins[0].id;
+    send_actions(
+        &mut state,
+        &sender,
+        UiAction::OpenPlugins { track_id, index: 4 },
+    );
+    send_actions(
+        &mut state,
+        &sender,
+        UiAction::DeletePlugin {
+            track_id,
+            plugin_id,
+        },
+    );
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    send_actions(
+        &mut state,
+        &sender,
+        UiAction::AddPlugin { track_id, index: 0 },
+    );
+    assert_eq!(state.tracks[0].plugins.len(), 3);
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    assert_eq!(
+        state.tracks[0]
+            .plugins
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect::<Vec<_>>(),
+        ["EPiano", "EPiano", "Delay", "EPiano"]
+    );
+    assert_eq!(state.page, Page::Track(track_id));
+}
+
+#[test]
 fn engine_round_trip_deletes_only_the_selected_plugin_instance() {
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
@@ -670,7 +764,14 @@ fn engine_round_trip_deletes_only_the_selected_plugin_instance() {
     poll_notifications(&mut state, &receiver);
     let id = state.tracks[0].id;
     for track_id in [id, id, id, state.tracks[1].id] {
-        send_actions(&mut state, &sender, UiAction::OpenPlugins(track_id));
+        send_actions(
+            &mut state,
+            &sender,
+            UiAction::OpenPlugins {
+                track_id,
+                index: u16::MAX,
+            },
+        );
         send_actions(
             &mut state,
             &sender,

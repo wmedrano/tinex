@@ -12,7 +12,7 @@ The GUI uses declarative widgets and an action → update → effect flow. Keep 
 - `gui/meter_polling.rs`: clock-driven meter sampling, capped at 30 Hz with at most one request in flight. Hidden/inactive/occluded or disconnected views do not sample; missed deadlines do not create catch-up bursts.
 - `gui/view.rs`: page routing, stale-track fallback, and the shared fixed status footer.
 - `gui/view/main.rs`: track list, track creation, opening, and deletion controls.
-- `gui/view/track.rs`: selected track's output meter, Add Plugin control, and confirmed plugin chain.
+- `gui/view/track.rs`: selected track's output meter, Add Plugin control for appending, and confirmed plugin chain with Insert Before controls.
 - `gui/view/plugins.rs`: plugin picker for the selected track and Back to Track navigation. Choices come from `tinex_plugins::FACTORY`.
 - `gui/theme.rs`: application styling.
 - `gui/graphics.rs`: rendering infrastructure and surface lifecycle.
@@ -29,9 +29,9 @@ The GUI uses declarative widgets and an action → update → effect flow. Keep 
 ## State and navigation invariants
 
 - Reflect confirmed engine operations in track state. Pending creations must not appear as confirmed tracks; pending plugin additions must not appear as confirmed plugins.
-- Plugin names are displayed in audio-chain order, including duplicate instances. Each add builds a `PluginInstance` whose `PluginInstanceId` keys that track's pending additions; `PluginAdded(track_id, plugin_id)` echoes the id and moves the matching entry into the confirmed list, which keeps the id so later per-instance operations can address one plugin instead of a name. Chain position follows confirmation order, not request order. Ignore confirmations for unknown track or plugin ids; never pair a confirmation positionally with a queued request.
+- Plugin names are displayed in audio-chain order, including duplicate instances. Each add builds a `PluginInstance` whose `PluginInstanceId` keys that track's pending additions; `PluginAdded { track_id, plugin_id, index }` echoes the id and actual insertion index and moves the matching entry into the confirmed list at that position. Keep the id so later per-instance operations can address one plugin instead of a name. Ignore confirmations for unknown track or plugin ids; never pair a confirmation positionally with a queued request.
 - Keep track identity separate from list position. Ignore stale IDs/invalid plugin selections; confirmed deletion of the selected track returns to the main page, including from its plugin picker.
-- Selecting a plugin sends an add request and returns to the track page. Back navigation is local and remains available after engine disconnection.
+- The plugin picker stores the requested chain index in `Page::Plugins`; `UiAction::AddPlugin.index` selects a factory entry. Selecting a plugin sends an add request at the stored chain index and returns to the track page. Out-of-range positions append. Back navigation is local and remains available after engine disconnection.
 - Disable engine-backed controls when disconnected and prevent additions to tracks being deleted. Failed sends/disconnection must clear pending operations without inventing successful changes.
 
 ## Layout and interaction invariants

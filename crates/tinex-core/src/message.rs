@@ -17,6 +17,8 @@ pub enum TinexRequest {
     AddPlugin {
         track_id: TrackId,
         plugin: PluginInstance,
+        // If out of bounds (like when using u16::MAX), then we append at the end.
+        index: u16,
     },
     DeletePlugin(TrackId, PluginInstanceId),
 }
@@ -31,6 +33,11 @@ pub enum TinexNotification {
     TrackCreationFailed(Track),
     TrackDeleted(Track),
     ArmTracks(HashSet<TrackId>),
-    PluginAdded(TrackId, PluginInstanceId),
+    /// Track, plugin instance, and actual insertion index in the audio chain.
+    PluginAdded {
+        track_id: TrackId,
+        plugin_id: PluginInstanceId,
+        index: u16,
+    },
     PluginDeleted(PluginInstance),
 }

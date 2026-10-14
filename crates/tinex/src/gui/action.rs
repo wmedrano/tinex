@@ -11,9 +11,13 @@ pub(super) enum UiAction {
     },
     CreateTrack,
     OpenTrack(TrackId),
-    OpenPlugins(TrackId),
+    OpenPlugins {
+        track_id: TrackId,
+        index: u16,
+    },
     AddPlugin {
         track_id: TrackId,
+        /// Selection in the plugin factory, independent of chain position.
         index: usize,
     },
     DeletePlugin {

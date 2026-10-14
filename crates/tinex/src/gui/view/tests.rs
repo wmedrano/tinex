@@ -297,7 +297,7 @@ fn cpu_meter_is_in_the_shared_footer_on_every_page() {
     for page in [
         Page::Main,
         Page::Track(track.id()),
-        Page::Plugins(track.id()),
+        Page::Plugins(track.id(), u16::MAX),
     ] {
         state.page = page;
         for load in [None, Some(0.0), Some(12.3), Some(100.0)] {
@@ -657,9 +657,11 @@ fn add_plugin_picker_supports_pointer_keyboard_and_back_navigation() {
     ui.input(Input::PointerMoved(Point::new(80.0, 186.0)));
     ui.input(Input::PointerPressed);
     let actions = ui.input(Input::PointerReleased);
-    assert!(matches!(actions.as_slice(), [UiAction::OpenPlugins(track_id)] if *track_id == id));
+    assert!(
+        matches!(actions.as_slice(), [UiAction::OpenPlugins { track_id, index: u16::MAX }] if *track_id == id)
+    );
     update(&mut state, Action::Ui(actions[0]));
-    assert_eq!(state.page, Page::Plugins(id));
+    assert_eq!(state.page, Page::Plugins(id, u16::MAX));
     ui.set_view(view(&state), size);
 
     let Widget::Column(children) = view(&state) else {
@@ -711,7 +713,13 @@ fn add_plugin_picker_supports_pointer_keyboard_and_back_navigation() {
             .is_empty()
     );
 
-    update(&mut state, Action::Ui(UiAction::OpenPlugins(id)));
+    update(
+        &mut state,
+        Action::Ui(UiAction::OpenPlugins {
+            track_id: id,
+            index: u16::MAX,
+        }),
+    );
     update(&mut state, Action::Disconnected);
     ui.set_view(view(&state), size);
     ui.input(Input::PointerMoved(Point::new(80.0, 100.0)));
@@ -738,12 +746,27 @@ fn plugin_picker_rejects_stale_tracks_and_invalid_selections() {
         panic!("expected track")
     };
     let id = track.id();
-    assert!(!update(&mut state, Action::Ui(UiAction::OpenPlugins(id))).changed);
+    assert!(
+        !update(
+            &mut state,
+            Action::Ui(UiAction::OpenPlugins {
+                track_id: id,
+                index: u16::MAX
+            })
+        )
+        .changed
+    );
     update(
         &mut state,
         Action::Notification(TinexNotification::TrackCreated(id)),
     );
-    update(&mut state, Action::Ui(UiAction::OpenPlugins(id)));
+    update(
+        &mut state,
+        Action::Ui(UiAction::OpenPlugins {
+            track_id: id,
+            index: u16::MAX,
+        }),
+    );
     assert!(
         update(
             &mut state,
@@ -772,7 +795,16 @@ fn plugin_picker_rejects_stale_tracks_and_invalid_selections() {
         Action::Notification(TinexNotification::TrackDeleted(track)),
     );
     assert_eq!(state.page, Page::Main);
-    assert!(!update(&mut state, Action::Ui(UiAction::OpenPlugins(id))).changed);
+    assert!(
+        !update(
+            &mut state,
+            Action::Ui(UiAction::OpenPlugins {
+                track_id: id,
+                index: u16::MAX
+            })
+        )
+        .changed
+    );
 }
 
 #[test]
@@ -1049,6 +1081,268 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
 }
 
 #[test]
+fn plugin_insertion_controls_select_positions_with_pointer_and_keyboard() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    use tinex_widgets::{ActivationKey, Input, Ui};
+    use vello::kurbo::Point;
+
+    let mut state = confirmed_tracks(2);
+    let track_id = state.tracks[0].id;
+    for index in 0..2 {
+        update(
+            &mut state,
+            Action::Ui(UiAction::OpenPlugins {
+                track_id,
+                index: u16::MAX,
+            }),
+        );
+        let effect = update(
+            &mut state,
+            Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
+        )
+        .effects
+        .remove(0);
+        let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
+            panic!("expected plugin")
+        };
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::PluginAdded {
+                track_id,
+                plugin_id: plugin.id(),
+                index,
+            }),
+        );
+    }
+    let before = state.tracks[0].plugins.clone();
+    for size in [Size::new(400.0, 480.0), Size::new(800.0, 450.0)] {
+        for scale in [1.0, 2.0] {
+            for (position, tabs, logical) in [
+                (0, 6, Point::new(size.width - 92.0, 282.0)),
+                (1, 8, Point::new(size.width - 92.0, 342.0)),
+                (u16::MAX, 3, Point::new(80.0, 186.0)),
+            ] {
+                for keyboard in [false, true] {
+                    state.page = Page::Track(track_id);
+                    state.tracks[0].plugins = before.clone();
+                    let mut ui = Ui::new(view(&state), size);
+                    let actions = if keyboard {
+                        for _ in 0..tabs {
+                            ui.input(Input::Tab { backwards: false });
+                        }
+                        ui.input(Input::Key {
+                            key: ActivationKey::Space,
+                            pressed: true,
+                            repeat: false,
+                        });
+                        ui.input(Input::Key {
+                            key: ActivationKey::Space,
+                            pressed: false,
+                            repeat: false,
+                        })
+                    } else {
+                        let physical = Point::new(logical.x * scale, logical.y * scale);
+                        ui.input(Input::PointerMoved(Point::new(
+                            physical.x / scale,
+                            physical.y / scale,
+                        )));
+                        ui.input(Input::PointerPressed);
+                        ui.input(Input::PointerReleased)
+                    };
+                    assert!(
+                        matches!(actions.as_slice(), [UiAction::OpenPlugins { track_id: id, index }]
+                        if *id == track_id && *index == position)
+                    );
+                    update(&mut state, Action::Ui(actions[0]));
+                    assert_eq!(state.page, Page::Plugins(track_id, position));
+                    let mut picker = Ui::new(view(&state), size);
+                    picker.input(Input::Tab { backwards: false });
+                    picker.input(Input::Tab { backwards: false });
+                    picker.input(Input::Key {
+                        key: ActivationKey::Enter,
+                        pressed: true,
+                        repeat: false,
+                    });
+                    let selection = picker.input(Input::Key {
+                        key: ActivationKey::Enter,
+                        pressed: false,
+                        repeat: false,
+                    });
+                    let effect = update(&mut state, Action::Ui(selection[0]))
+                        .effects
+                        .remove(0);
+                    let TinexRequest::AddPlugin {
+                        track_id: id,
+                        plugin,
+                        index,
+                    } = effect.request
+                    else {
+                        panic!("expected plugin addition")
+                    };
+                    assert_eq!((id, index), (track_id, position));
+                    assert_eq!(state.page, Page::Track(track_id));
+                    assert_eq!(state.tracks[0].plugins, before);
+                    assert_eq!(state.tracks[0].pending_plugins.len(), 1);
+                    let actual = position.min(before.len() as u16);
+                    update(
+                        &mut state,
+                        Action::Notification(TinexNotification::PluginAdded {
+                            track_id,
+                            plugin_id: plugin.id(),
+                            index: actual,
+                        }),
+                    );
+                    assert_eq!(state.tracks[0].plugins[usize::from(actual)].id, plugin.id());
+                    assert!(state.tracks[0].pending_plugins.is_empty());
+                    assert!(state.tracks[1].plugins.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn insertion_buttons_keep_identity_and_disable_for_unavailable_tracks() {
+    use crate::gui::state::UiPluginInstance;
+    use tinex_core::plugin::PluginInstanceId;
+    use tinex_widgets::{ActivationKey, Input, Ui, WidgetId};
+    use vello::kurbo::Point;
+
+    let mut state = confirmed_tracks(1);
+    let track_id = state.tracks[0].id;
+    let plugin = UiPluginInstance {
+        id: PluginInstanceId::new(),
+        name: "EPiano",
+        delete_button: WidgetId::new(),
+        insert_before_button: WidgetId::new(),
+        deleting: false,
+    };
+    state.tracks[0].plugins.push(plugin.clone());
+    state.page = Page::Track(track_id);
+    let size = Size::new(400.0, 480.0);
+    let mut ui = Ui::new(view(&state), size);
+    // Moving the same plugin in the chain changes its action's index while
+    // its widget identity and keyboard focus survive the view rebuild.
+    for _ in 0..6 {
+        ui.input(Input::Tab { backwards: false });
+    }
+    ui.input(Input::Key {
+        key: ActivationKey::Enter,
+        pressed: true,
+        repeat: false,
+    });
+    assert!(
+        matches!(ui.input(Input::Key { key: ActivationKey::Enter, pressed: false, repeat: false }).as_slice(),
+        [UiAction::OpenPlugins { track_id: id, index: 0 }] if *id == track_id)
+    );
+    let mut earlier = plugin.clone();
+    earlier.id = PluginInstanceId::new();
+    earlier.delete_button = WidgetId::new();
+    earlier.insert_before_button = WidgetId::new();
+    state.tracks[0].plugins.insert(0, earlier);
+    ui.set_view(view(&state), size);
+    ui.input(Input::Key {
+        key: ActivationKey::Enter,
+        pressed: true,
+        repeat: false,
+    });
+    assert!(
+        matches!(ui.input(Input::Key { key: ActivationKey::Enter, pressed: false, repeat: false }).as_slice(),
+        [UiAction::OpenPlugins { track_id: id, index: 1 }] if *id == track_id)
+    );
+    for (connected, deleting) in [(true, true), (false, false)] {
+        state.connected = connected;
+        state.tracks[0].deleting = deleting;
+        ui.set_view(view(&state), size);
+        for y in [186.0, 282.0, 342.0] {
+            let x = if y == 186.0 { 80.0 } else { 308.0 };
+            ui.input(Input::PointerMoved(Point::new(x, y)));
+            ui.input(Input::PointerPressed);
+            assert!(ui.input(Input::PointerReleased).is_empty());
+        }
+    }
+}
+
+#[test]
+fn scrolling_plugin_insertion_controls_preserves_footer_and_targets_visible_position() {
+    use crate::gui::state::UiPluginInstance;
+    use tinex_core::plugin::PluginInstanceId;
+    use tinex_widgets::{Input, Ui, WidgetId};
+    use vello::kurbo::Point;
+
+    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
+        for scale in [1.0, 2.0] {
+            for count in [0, 20] {
+                let mut state = confirmed_tracks(1);
+                let track_id = state.tracks[0].id;
+                state.page = Page::Track(track_id);
+                state.tracks[0].plugins = (0..count)
+                    .map(|_| UiPluginInstance {
+                        id: PluginInstanceId::new(),
+                        name: "EPiano",
+                        delete_button: WidgetId::new(),
+                        insert_before_button: WidgetId::new(),
+                        deleting: false,
+                    })
+                    .collect();
+                let mut ui = Ui::new(view(&state), size);
+                let mut text = TextRenderer::new();
+                let theme = Theme::default();
+                let mut scene = Scene::new();
+                ui.render(&mut scene, &mut text, &theme.widgets, scale);
+                let footer: Vec<_> = scene
+                    .encoding()
+                    .resources
+                    .glyph_runs
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|run| run.transform)
+                    .collect();
+                assert_eq!(footer.len(), 2);
+                assert!(
+                    footer.iter().all(|transform| transform.translation[1]
+                        == ((size.height - 26.0) * scale) as f32)
+                );
+                ui.input(Input::PointerMoved(Point::new(36.0, 100.0)));
+                ui.input(Input::Scroll(10_000.0));
+                ui.set_view(view(&state), size);
+                scene.reset();
+                ui.render(&mut scene, &mut text, &theme.widgets, scale);
+                let scrolled_footer: Vec<_> = scene
+                    .encoding()
+                    .resources
+                    .glyph_runs
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|run| run.transform)
+                    .collect();
+                assert_eq!(scrolled_footer, footer);
+                ui.input(Input::PointerMoved(Point::new(
+                    size.width - 92.0,
+                    size.height - 16.0,
+                )));
+                ui.input(Input::PointerPressed);
+                assert!(ui.input(Input::PointerReleased).is_empty());
+                if count > 0 {
+                    let physical =
+                        Point::new((size.width - 92.0) * scale, (size.height - 66.0) * scale);
+                    ui.input(Input::PointerMoved(Point::new(
+                        physical.x / scale,
+                        physical.y / scale,
+                    )));
+                    ui.input(Input::PointerPressed);
+                    assert!(matches!(ui.input(Input::PointerReleased).as_slice(),
+                        [UiAction::OpenPlugins { track_id: id, index: 19 }] if *id == track_id));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
     use crate::gui::{action::Action, update::update};
     use tinex_core::{TinexNotification, TinexRequest};
@@ -1057,7 +1351,13 @@ fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
 
     let mut state = confirmed_tracks(1);
     let track_id = state.tracks[0].id;
-    update(&mut state, Action::Ui(UiAction::OpenPlugins(track_id)));
+    update(
+        &mut state,
+        Action::Ui(UiAction::OpenPlugins {
+            track_id,
+            index: u16::MAX,
+        }),
+    );
     let effect = update(
         &mut state,
         Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
@@ -1070,7 +1370,11 @@ fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
     let plugin_id = plugin.id();
     update(
         &mut state,
-        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)),
+        Action::Notification(TinexNotification::PluginAdded {
+            track_id,
+            plugin_id,
+            index: 0,
+        }),
     );
     let size = Size::new(400.0, 480.0);
     let button_id = state.tracks[0].plugins[0].delete_button;
@@ -1115,7 +1419,7 @@ fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
         );
     }
     let mut ui = Ui::new(view(&state), size);
-    ui.input(Input::PointerMoved(Point::new(320.0, 282.0)));
+    ui.input(Input::PointerMoved(Point::new(176.0, 282.0)));
     ui.input(Input::PointerPressed);
     let actions = ui.input(Input::PointerReleased);
     assert!(

@@ -19,7 +19,10 @@ pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiActi
                     "Add Plugin",
                     144.0,
                     state.connected && !track.deleting,
-                    UiAction::OpenPlugins(track.id),
+                    UiAction::OpenPlugins {
+                        track_id: track.id,
+                        index: u16::MAX,
+                    },
                 ),
                 super::track_arm_control(state, track),
             ],
@@ -30,26 +33,42 @@ pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiActi
     if track.plugins.is_empty() {
         content.push(Widget::label("No plugins on this track yet.", Tone::Muted));
     } else {
-        content.extend(track.plugins.iter().map(|plugin| Widget::Row {
-            children: vec![
-                Widget::label(plugin.name, Tone::Normal),
-                Widget::button(
-                    plugin.delete_button,
-                    if plugin.deleting {
-                        "Deleting…"
-                    } else {
-                        "Delete"
-                    },
-                    112.0,
-                    state.connected && !track.deleting && !plugin.deleting,
-                    UiAction::DeletePlugin {
-                        track_id: track.id,
-                        plugin_id: plugin.id,
-                    },
-                ),
-            ],
-            surface: true,
-        }));
+        content.extend(
+            track
+                .plugins
+                .iter()
+                .enumerate()
+                .map(|(index, plugin)| Widget::Row {
+                    children: vec![
+                        Widget::label(plugin.name, Tone::Normal),
+                        Widget::button(
+                            plugin.delete_button,
+                            if plugin.deleting {
+                                "Deleting…"
+                            } else {
+                                "Delete"
+                            },
+                            112.0,
+                            state.connected && !track.deleting && !plugin.deleting,
+                            UiAction::DeletePlugin {
+                                track_id: track.id,
+                                plugin_id: plugin.id,
+                            },
+                        ),
+                        Widget::button(
+                            plugin.insert_before_button,
+                            "Insert Before",
+                            136.0,
+                            state.connected && !track.deleting && u16::try_from(index).is_ok(),
+                            UiAction::OpenPlugins {
+                                track_id: track.id,
+                                index: u16::try_from(index).unwrap_or(u16::MAX),
+                            },
+                        ),
+                    ],
+                    surface: true,
+                }),
+        );
     }
     if !track.pending_plugins.is_empty() {
         content.push(Widget::label("Adding plugin…", Tone::Muted));

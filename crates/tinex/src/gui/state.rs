@@ -31,6 +31,7 @@ pub(super) struct UiPluginInstance {
     pub id: PluginInstanceId,
     pub name: &'static str,
     pub delete_button: WidgetId,
+    pub insert_before_button: WidgetId,
     pub deleting: bool,
 }
 
@@ -44,7 +45,7 @@ pub(super) enum Page {
     #[default]
     Main,
     Track(TrackId),
-    Plugins(TrackId),
+    Plugins(TrackId, u16),
 }
 
 pub(super) struct AppState {

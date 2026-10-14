@@ -45,6 +45,14 @@ impl Track {
         self.plugins.push(plugin);
     }
 
+    /// Inserts before `index`, appending when it exceeds the chain length.
+    /// Returns the actual position for the engine's confirmation.
+    pub fn insert_plugin(&mut self, index: u16, plugin: PluginInstance) -> u16 {
+        let index = usize::from(index).min(self.plugins.len());
+        self.plugins.insert(index, plugin);
+        index as u16
+    }
+
     pub fn remove_plugin(
         &mut self,
         plugin_instance_id: PluginInstanceId,
@@ -67,7 +75,7 @@ impl Track {
     }
 
     /// Buffers are two stereo pairs in left/right order. Returns the rendered pair.
-    /// Plugins run in insertion order, each receiving the previous plugin's output.
+    /// Plugins run in chain order, each receiving the previous plugin's output.
     /// Plugins must write every output sample; buffer contents are otherwise unspecified.
     /// A track without plugins writes silence to the returned pair.
     pub fn process<'buffers>(
