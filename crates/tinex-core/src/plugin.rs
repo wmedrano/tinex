@@ -9,6 +9,14 @@ pub struct PluginInstance {
     plugin: Box<dyn Plugin>,
 }
 
+impl std::fmt::Debug for PluginInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginInstance")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PluginInstance {
     pub fn new(plugin: Box<dyn Plugin>) -> PluginInstance {
         PluginInstance {

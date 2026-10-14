@@ -1,6 +1,6 @@
 use wmidi::MidiMessage;
 
-use crate::plugin::{Plugin, PluginInstance};
+use crate::plugin::{Plugin, PluginInstance, PluginInstanceId};
 
 use super::{id::Id, output_level_weight};
 
@@ -43,6 +43,17 @@ impl Track {
 
     pub fn push_plugin(&mut self, plugin: PluginInstance) {
         self.plugins.push(plugin);
+    }
+
+    pub fn remove_plugin(
+        &mut self,
+        plugin_instance_id: PluginInstanceId,
+    ) -> Option<PluginInstance> {
+        let idx = self
+            .plugins
+            .iter()
+            .position(|p| p.id() == plugin_instance_id)?;
+        Some(self.plugins.remove(idx))
     }
 
     pub fn id(&self) -> TrackId {

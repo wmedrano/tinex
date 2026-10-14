@@ -123,10 +123,37 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                         UiPluginInstance {
                             id: plugin_id,
                             name: builder.name(),
+                            delete_button: WidgetId::new(),
+                            deleting: false,
                         },
                     );
                 state.page = Page::Track(track_id);
                 state.message = None;
+                result.changed = true;
+            }
+        }
+        Action::Ui(UiAction::DeletePlugin {
+            track_id,
+            plugin_id,
+        }) if state.connected => {
+            if let Some(track) = state
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id && !track.deleting)
+                && let Some(plugin) = track
+                    .plugins
+                    .iter_mut()
+                    .find(|plugin| plugin.id == plugin_id && !plugin.deleting)
+            {
+                plugin.deleting = true;
+                state.message = None;
+                result.effects.push(Effect {
+                    request: TinexRequest::DeletePlugin(track_id, plugin_id),
+                    operation: Operation::DeletePlugin {
+                        track_id,
+                        plugin_id,
+                    },
+                });
                 result.changed = true;
             }
         }
@@ -244,6 +271,14 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 result.changed = true;
             }
         }
+        Action::Notification(TinexNotification::PluginDeleted(plugin)) => {
+            for track in &mut state.tracks {
+                let count = track.plugins.len();
+                track.plugins.retain(|entry| entry.id != plugin.id());
+                result.changed |= track.plugins.len() != count;
+            }
+            // The returned engine instance is dropped here on the GUI thread.
+        }
         Action::RequestFailed(operation) => {
             match operation {
                 Operation::SetTrackVolume {
@@ -259,6 +294,19 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     state.pending.remove(&id);
                 }
                 Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
+                Operation::DeletePlugin {
+                    track_id,
+                    plugin_id,
+                } => {
+                    if let Some(track) = state.tracks.iter_mut().find(|track| track.id == track_id)
+                        && let Some(plugin) = track
+                            .plugins
+                            .iter_mut()
+                            .find(|plugin| plugin.id == plugin_id)
+                    {
+                        plugin.deleting = false;
+                    }
+                }
                 Operation::Delete(id) => {
                     if let Some(row) = state.tracks.iter_mut().find(|row| row.id == id) {
                         row.deleting = false;
@@ -293,6 +341,9 @@ fn disconnect(state: &mut AppState) {
     for row in &mut state.tracks {
         row.deleting = false;
         row.pending_plugins.clear();
+        for plugin in &mut row.plugins {
+            plugin.deleting = false;
+        }
         row.output_level = 0.0;
     }
     state.message = Some("Audio engine disconnected. Track controls are unavailable.".into());

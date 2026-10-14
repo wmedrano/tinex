@@ -30,6 +30,8 @@ pub(super) struct UiTrack {
 pub(super) struct UiPluginInstance {
     pub id: PluginInstanceId,
     pub name: &'static str,
+    pub delete_button: WidgetId,
+    pub deleting: bool,
 }
 
 pub(super) struct PendingTrack {

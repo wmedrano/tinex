@@ -1,5 +1,5 @@
 use super::dispatch::execute_effect;
-use super::state::UiPluginInstance;
+use super::state::{Page, UiPluginInstance};
 use super::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -378,7 +378,7 @@ fn failed_delete_send_restores_row_and_disables_engine_actions() {
 }
 
 #[test]
-fn returned_tracks_are_destroyed_on_the_polling_thread() {
+fn returned_tracks_and_plugins_are_destroyed_on_the_polling_thread() {
     struct DropSpy(Arc<Mutex<Vec<std::thread::ThreadId>>>);
     impl Drop for DropSpy {
         fn drop(&mut self) {
@@ -405,7 +405,12 @@ fn returned_tracks_are_destroyed_on_the_polling_thread() {
             .unwrap();
         sender
             .send(TinexNotification::TrackCreationFailed(Track::with_plugin(
-                DropSpy(worker_drops),
+                DropSpy(Arc::clone(&worker_drops)),
+            )))
+            .unwrap();
+        sender
+            .send(TinexNotification::PluginDeleted(PluginInstance::new(
+                Box::new(DropSpy(worker_drops)),
             )))
             .unwrap();
     })
@@ -413,7 +418,7 @@ fn returned_tracks_are_destroyed_on_the_polling_thread() {
     .unwrap();
     assert!(drops.lock().unwrap().is_empty());
     poll_notifications(&mut AppState::default(), &receiver);
-    assert_eq!(*drops.lock().unwrap(), vec![std::thread::current().id(); 2]);
+    assert_eq!(*drops.lock().unwrap(), vec![std::thread::current().id(); 3]);
 }
 
 #[test]
@@ -650,4 +655,47 @@ fn volume_requests_change_the_audio_mix_without_confirmation() {
     );
     assert!(!state.connected);
     assert_eq!(state.tracks[0].volume_db, 12.0);
+}
+
+#[test]
+fn engine_round_trip_deletes_only_the_selected_plugin_instance() {
+    let (sender, requests) = mpsc::channel();
+    let (notifications, receiver) = mpsc::channel();
+    let mut engine = Tinex::new(requests, notifications).unwrap();
+    let mut state = AppState::default();
+    for _ in 0..2 {
+        send_actions(&mut state, &sender, UiAction::CreateTrack);
+    }
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    let id = state.tracks[0].id;
+    for track_id in [id, id, id, state.tracks[1].id] {
+        send_actions(&mut state, &sender, UiAction::OpenPlugins(track_id));
+        send_actions(
+            &mut state,
+            &sender,
+            UiAction::AddPlugin { track_id, index: 0 },
+        );
+    }
+    process(&mut engine);
+    poll_notifications(&mut state, &receiver);
+    let mut expected = state.tracks[0].plugins.clone();
+    let removed = expected.remove(1);
+    let other = state.tracks[1].plugins.clone();
+    send_actions(&mut state, &sender, UiAction::OpenTrack(id));
+    send_actions(
+        &mut state,
+        &sender,
+        UiAction::DeletePlugin {
+            track_id: id,
+            plugin_id: removed.id,
+        },
+    );
+    assert_eq!(state.tracks[0].plugins.len(), 3);
+    assert!(state.tracks[0].plugins[1].deleting);
+    process(&mut engine);
+    assert!(poll_notifications(&mut state, &receiver));
+    assert_eq!(state.tracks[0].plugins, expected);
+    assert_eq!(state.tracks[1].plugins, other);
+    assert_eq!(state.page, Page::Track(id));
 }

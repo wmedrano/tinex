@@ -18,6 +18,7 @@ pub enum TinexRequest {
         track_id: TrackId,
         plugin: PluginInstance,
     },
+    DeletePlugin(TrackId, PluginInstanceId),
 }
 
 #[derive(Debug)]
@@ -31,4 +32,5 @@ pub enum TinexNotification {
     TrackDeleted(Track),
     ArmTracks(HashSet<TrackId>),
     PluginAdded(TrackId, PluginInstanceId),
+    PluginDeleted(PluginInstance),
 }

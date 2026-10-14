@@ -116,6 +116,17 @@ impl Tinex {
                             .send(TinexNotification::PluginAdded(track_id, plugin_id));
                     }
                 }
+                TinexRequest::DeletePlugin(track_id, plugin_instance_id) => {
+                    let Some(track) = self.tracks.iter_mut().find(|t| t.id() == track_id) else {
+                        continue;
+                    };
+                    let Some(plugin_instance) = track.remove_plugin(plugin_instance_id) else {
+                        continue;
+                    };
+                    let _ = self
+                        .notifications
+                        .send(TinexNotification::PluginDeleted(plugin_instance));
+                }
             }
         }
     }
@@ -689,6 +700,196 @@ mod tests {
             _arena: arena,
         });
         (left[0], right[0])
+    }
+
+    struct PluginTransform {
+        gain: f32,
+        offset: f32,
+    }
+
+    impl plugin::Plugin for PluginTransform {
+        fn process(
+            &mut self,
+            _: &[(usize, MidiMessage)],
+            input: [&[f32]; 2],
+            output: [&mut [f32]; 2],
+        ) {
+            for (input, output) in input.into_iter().zip(output) {
+                for (index, sample) in output.iter_mut().enumerate() {
+                    *sample = input.get(index).copied().unwrap_or(0.0) * self.gain + self.offset;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_plugin_updates_only_target_chain_and_preserves_order() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let mut target = Track::with_plugin(PluginTransform {
+            gain: 0.0,
+            offset: 1.0,
+        });
+        let removed = plugin::PluginInstance::new(Box::new(PluginTransform {
+            gain: 2.0,
+            offset: 3.0,
+        }));
+        let removed_id = removed.id();
+        target.push_plugin(removed);
+        target.push_plugin(plugin::PluginInstance::new(Box::new(PluginTransform {
+            gain: 4.0,
+            offset: 5.0,
+        })));
+        let target_id = target.id();
+        let other = Track::with_plugin(PluginTransform {
+            gain: 0.0,
+            offset: 7.0,
+        });
+        let other_id = other.id();
+        sender.send(TinexRequest::NewTrack(target)).unwrap();
+        sender.send(TinexRequest::NewTrack(other)).unwrap();
+        let arena = bumpalo::Bump::new();
+        assert_eq!(render(&mut tinex, &arena), (32.0, 32.0));
+        assert_eq!(received.try_iter().count(), 2);
+
+        sender
+            .send(TinexRequest::DeletePlugin(target_id, removed_id))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (16.0, 16.0));
+        assert!(matches!(received.try_iter().collect::<Vec<_>>().as_slice(),
+            [TinexNotification::PluginDeleted(instance)] if instance.id() == removed_id));
+        // Isolate each contribution to verify the other track's audio is unchanged.
+        sender
+            .send(TinexRequest::SetTrackVolume(target_id, 0.0))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (7.0, 7.0));
+        sender
+            .send(TinexRequest::SetTrackVolume(target_id, 1.0))
+            .unwrap();
+        sender
+            .send(TinexRequest::SetTrackVolume(other_id, 0.0))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (9.0, 9.0));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn deleting_last_plugin_silences_track_and_returns_instance_without_dropping_it() {
+        struct ObservedPlugin(Arc<std::sync::atomic::AtomicBool>);
+        impl plugin::Plugin for ObservedPlugin {
+            fn process(
+                &mut self,
+                _: &[(usize, MidiMessage)],
+                _: [&[f32]; 2],
+                output: [&mut [f32]; 2],
+            ) {
+                for channel in output {
+                    channel.fill(1.0);
+                }
+            }
+        }
+        impl Drop for ObservedPlugin {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let instance = plugin::PluginInstance::new(Box::new(ObservedPlugin(dropped.clone())));
+        let instance_id = instance.id();
+        let mut track = Track::new();
+        let track_id = track.id();
+        track.push_plugin(instance);
+        sender.send(TinexRequest::NewTrack(track)).unwrap();
+
+        let arena = bumpalo::Bump::new();
+        let mut left = [99.0; 2];
+        let mut right = [99.0; 2];
+        for expected in [1.0, 0.0, 0.0] {
+            tinex.process(ProcessArgs {
+                sample_rate: 48_000,
+                input: [&[], &[]],
+                midi_input: &[],
+                output: [&mut left, &mut right],
+                _arena: &arena,
+            });
+            assert_eq!(left, [expected; 2]);
+            assert_eq!(right, [expected; 2]);
+            if expected == 1.0 {
+                assert!(
+                    matches!(received.try_recv().unwrap(), TinexNotification::TrackCreated(id) if id == track_id)
+                );
+                sender
+                    .send(TinexRequest::DeletePlugin(track_id, instance_id))
+                    .unwrap();
+            }
+        }
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        let notification = received.try_recv().unwrap();
+        assert!(
+            matches!(&notification, TinexNotification::PluginDeleted(instance) if instance.id() == instance_id)
+        );
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        drop(notification);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn unknown_or_repeated_plugin_deletions_are_noops() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications).unwrap();
+        let mut target = Track::with_plugin(PluginTransform {
+            gain: 0.0,
+            offset: 2.0,
+        });
+        let instance = plugin::PluginInstance::new(Box::new(PluginTransform {
+            gain: 3.0,
+            offset: 1.0,
+        }));
+        let instance_id = instance.id();
+        target.push_plugin(instance);
+        let target_id = target.id();
+        let other = Track::with_plugin(PluginTransform {
+            gain: 0.0,
+            offset: 5.0,
+        });
+        let other_id = other.id();
+        sender.send(TinexRequest::NewTrack(target)).unwrap();
+        sender.send(TinexRequest::NewTrack(other)).unwrap();
+        let arena = bumpalo::Bump::new();
+        assert_eq!(render(&mut tinex, &arena), (12.0, 12.0));
+        assert_eq!(received.try_iter().count(), 2);
+
+        for (track_id, plugin_id) in [
+            (TrackId::new(), instance_id),
+            (target_id, plugin::PluginInstanceId::new()),
+            (other_id, instance_id),
+        ] {
+            sender
+                .send(TinexRequest::DeletePlugin(track_id, plugin_id))
+                .unwrap();
+            assert_eq!(render(&mut tinex, &arena), (12.0, 12.0));
+            assert!(received.try_recv().is_err());
+        }
+        sender
+            .send(TinexRequest::DeletePlugin(target_id, instance_id))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (7.0, 7.0));
+        assert!(
+            matches!(received.try_recv().unwrap(), TinexNotification::PluginDeleted(instance) if instance.id() == instance_id)
+        );
+        assert!(received.try_recv().is_err());
+        sender
+            .send(TinexRequest::DeletePlugin(target_id, instance_id))
+            .unwrap();
+        assert_eq!(render(&mut tinex, &arena), (7.0, 7.0));
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

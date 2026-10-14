@@ -1047,3 +1047,95 @@ fn main_page_volume_controls_target_each_track_and_never_navigate() {
     assert!(ui.input(Input::PointerReleased).is_empty());
     assert_eq!(state.page, Page::Main);
 }
+
+#[test]
+fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
+    use crate::gui::{action::Action, update::update};
+    use tinex_core::{TinexNotification, TinexRequest};
+    use tinex_widgets::{ActivationKey, Input, Ui};
+    use vello::kurbo::Point;
+
+    let mut state = confirmed_tracks(1);
+    let track_id = state.tracks[0].id;
+    update(&mut state, Action::Ui(UiAction::OpenPlugins(track_id)));
+    let effect = update(
+        &mut state,
+        Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
+    )
+    .effects
+    .remove(0);
+    let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
+        panic!("expected plugin")
+    };
+    let plugin_id = plugin.id();
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::PluginAdded(track_id, plugin_id)),
+    );
+    let size = Size::new(400.0, 480.0);
+    let button_id = state.tracks[0].plugins[0].delete_button;
+    let assert_button = |state: &AppState, expected_label: &str, expected_enabled: bool| {
+        let Widget::Column(page) = view(state) else {
+            panic!("expected page")
+        };
+        let Widget::Scroll { child, .. } = &page[1] else {
+            panic!("expected scroll")
+        };
+        let Widget::Column(rows) = &**child else {
+            panic!("expected content")
+        };
+        let Widget::Row { children, .. } = &rows[3] else {
+            panic!("expected plugin row")
+        };
+        assert!(matches!(&children[1], Widget::Button {
+            id, label, enabled, action: UiAction::DeletePlugin { track_id: track, plugin_id: instance }, ..
+        } if *id == button_id && label == expected_label && *enabled == expected_enabled
+            && *track == track_id && *instance == plugin_id));
+    };
+    assert_button(&state, "Delete", true);
+    for key in [ActivationKey::Enter, ActivationKey::Space] {
+        let mut ui = Ui::new(view(&state), size);
+        for _ in 0..5 {
+            // Back, volume, Add Plugin, Arm, Delete.
+            ui.input(Input::Tab { backwards: false });
+        }
+        ui.input(Input::Key {
+            key,
+            pressed: true,
+            repeat: false,
+        });
+        let actions = ui.input(Input::Key {
+            key,
+            pressed: false,
+            repeat: false,
+        });
+        assert!(
+            matches!(actions.as_slice(), [UiAction::DeletePlugin { track_id: track, plugin_id: instance }]
+            if *track == track_id && *instance == plugin_id)
+        );
+    }
+    let mut ui = Ui::new(view(&state), size);
+    ui.input(Input::PointerMoved(Point::new(320.0, 282.0)));
+    ui.input(Input::PointerPressed);
+    let actions = ui.input(Input::PointerReleased);
+    assert!(
+        matches!(actions.as_slice(), [UiAction::DeletePlugin { track_id: track, plugin_id: instance }]
+        if *track == track_id && *instance == plugin_id)
+    );
+    update(&mut state, Action::Ui(actions[0]));
+    assert_button(&state, "Deleting…", false);
+    ui.set_view(view(&state), size);
+    ui.input(Input::PointerPressed);
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    state.tracks[0].plugins[0].deleting = false;
+    update(&mut state, Action::Ui(UiAction::DeleteTrack(track_id)));
+    assert_button(&state, "Delete", false);
+    ui.set_view(view(&state), size);
+    ui.input(Input::PointerPressed);
+    assert!(ui.input(Input::PointerReleased).is_empty());
+    update(&mut state, Action::Disconnected);
+    assert_button(&state, "Delete", false);
+    ui.set_view(view(&state), size);
+    ui.input(Input::PointerPressed);
+    assert!(ui.input(Input::PointerReleased).is_empty());
+}

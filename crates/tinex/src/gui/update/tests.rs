@@ -505,3 +505,135 @@ fn volume_above_twelve_db_is_clamped_to_the_new_limit() {
         if *id == track.id() && (*gain - 10.0_f32.powf(0.6)).abs() < 1e-6)
     );
 }
+
+fn add_confirmed_plugin(
+    state: &mut AppState,
+    track_id: TrackId,
+) -> tinex_core::plugin::PluginInstance {
+    update(state, Action::Ui(UiAction::OpenPlugins(track_id)));
+    let effect = update(
+        state,
+        Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
+    )
+    .effects
+    .remove(0);
+    let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
+        panic!("expected plugin addition")
+    };
+    update(
+        state,
+        Action::Notification(TinexNotification::PluginAdded(track_id, plugin.id())),
+    );
+    plugin
+}
+
+#[test]
+fn plugin_deletion_waits_for_confirmation_and_preserves_other_instances() {
+    let mut state = AppState::default();
+    let first = create(&mut state);
+    let second = create(&mut state);
+    confirm(&mut state, first.id());
+    confirm(&mut state, second.id());
+    let removed = add_confirmed_plugin(&mut state, first.id());
+    let survivor = add_confirmed_plugin(&mut state, first.id());
+    let other = add_confirmed_plugin(&mut state, second.id());
+    state.page = Page::Track(first.id());
+    let button = state.tracks[0].plugins[1].delete_button;
+    let action = UiAction::DeletePlugin {
+        track_id: first.id(),
+        plugin_id: removed.id(),
+    };
+    let result = update(&mut state, Action::Ui(action));
+    assert!(result.changed);
+    assert!(matches!(result.effects.as_slice(), [Effect {
+        request: TinexRequest::DeletePlugin(track_id, plugin_id), ..
+    }] if *track_id == first.id() && *plugin_id == removed.id()));
+    assert_eq!(state.tracks[0].plugins.len(), 2);
+    assert!(state.tracks[0].plugins[0].deleting);
+    assert!(update(&mut state, Action::Ui(action)).effects.is_empty());
+    assert!(
+        update(
+            &mut state,
+            Action::Ui(UiAction::DeletePlugin {
+                track_id: second.id(),
+                plugin_id: removed.id(),
+            })
+        )
+        .effects
+        .is_empty()
+    );
+    assert!(
+        update(
+            &mut state,
+            Action::Ui(UiAction::DeletePlugin {
+                track_id: TrackId::new(),
+                plugin_id: removed.id(),
+            })
+        )
+        .effects
+        .is_empty()
+    );
+    assert!(
+        update(
+            &mut state,
+            Action::Notification(TinexNotification::PluginDeleted(removed))
+        )
+        .changed
+    );
+    assert_eq!(state.tracks[0].plugins[0].id, survivor.id());
+    assert_eq!(state.tracks[0].plugins[0].delete_button, button);
+    assert_eq!(state.tracks[1].plugins[0].id, other.id());
+    assert_eq!(state.page, Page::Track(first.id()));
+    assert!(update(&mut state, Action::Ui(action)).effects.is_empty());
+    update(&mut state, Action::Ui(UiAction::DeleteTrack(first.id())));
+    assert!(
+        update(
+            &mut state,
+            Action::Ui(UiAction::DeletePlugin {
+                track_id: first.id(),
+                plugin_id: survivor.id(),
+            })
+        )
+        .effects
+        .is_empty()
+    );
+    update(
+        &mut state,
+        Action::Notification(TinexNotification::TrackDeleted(first)),
+    );
+    assert!(
+        !update(
+            &mut state,
+            Action::Notification(TinexNotification::PluginDeleted(survivor))
+        )
+        .changed
+    );
+}
+
+#[test]
+fn failed_plugin_deletion_and_disconnection_preserve_confirmed_plugins() {
+    for failed_send in [false, true] {
+        let mut state = AppState::default();
+        let track = create(&mut state);
+        confirm(&mut state, track.id());
+        let plugin = add_confirmed_plugin(&mut state, track.id());
+        let before = state.tracks[0].plugins.clone();
+        let action = UiAction::DeletePlugin {
+            track_id: track.id(),
+            plugin_id: plugin.id(),
+        };
+        let effect = update(&mut state, Action::Ui(action)).effects.remove(0);
+        if failed_send {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            drop(receiver);
+            let failure = crate::gui::dispatch::execute_effect(&sender, effect).unwrap();
+            update(&mut state, failure);
+        } else {
+            update(&mut state, Action::Disconnected);
+        }
+        assert!(!state.connected);
+        assert_eq!(state.tracks[0].plugins, before);
+        assert_eq!(state.page, Page::Track(track.id()));
+        assert!(update(&mut state, Action::Ui(action)).effects.is_empty());
+    }
+}

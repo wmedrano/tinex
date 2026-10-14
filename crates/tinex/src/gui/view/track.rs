@@ -31,7 +31,23 @@ pub(super) fn track_view(state: &AppState, track: &UiTrack) -> Vec<Widget<UiActi
         content.push(Widget::label("No plugins on this track yet.", Tone::Muted));
     } else {
         content.extend(track.plugins.iter().map(|plugin| Widget::Row {
-            children: vec![Widget::label(plugin.name, Tone::Normal)],
+            children: vec![
+                Widget::label(plugin.name, Tone::Normal),
+                Widget::button(
+                    plugin.delete_button,
+                    if plugin.deleting {
+                        "Deleting…"
+                    } else {
+                        "Delete"
+                    },
+                    112.0,
+                    state.connected && !track.deleting && !plugin.deleting,
+                    UiAction::DeletePlugin {
+                        track_id: track.id,
+                        plugin_id: plugin.id,
+                    },
+                ),
+            ],
             surface: true,
         }));
     }
