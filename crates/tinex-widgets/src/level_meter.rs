@@ -1,7 +1,8 @@
 //! Weighted-peak dBFS display: unity is 0 dBFS, not the end of the scale.
-use vello::Scene;
-use vello::kurbo::{Affine, Line, Rect, Stroke};
-use vello::peniko::{Color, Fill};
+use xilem::Color;
+use xilem::masonry::kurbo::{Affine, Line, Rect, Stroke};
+use xilem::masonry::peniko::Fill;
+use xilem::masonry::vello::Scene;
 
 pub const METER_MIN_DB: f64 = -60.0;
 pub const METER_MAX_DB: f64 = 12.0;
@@ -21,6 +22,7 @@ pub fn amplitude_to_dbfs(amplitude: f32) -> f64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterStyle {
     pub trough: Color,
     pub normal: Color,
@@ -70,7 +72,7 @@ impl LevelMeter {
             return;
         };
         let transform = Affine::scale(scale);
-        scene.push_clip_layer(Fill::NonZero, transform, &rect);
+        scene.push_clip_layer(transform, &rect);
         scene.fill(Fill::NonZero, transform, style.trough, None, &geometry.bar);
         let colors = [style.normal, style.warning, style.near_ceiling, style.over];
         for (segment, color) in geometry.segments.into_iter().zip(colors) {

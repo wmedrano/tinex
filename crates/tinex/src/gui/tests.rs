@@ -3,10 +3,65 @@ use super::state::{Page, UiPluginInstance};
 use super::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use tinex_core::plugin::{PluginInstance, PluginInstanceId};
 use tinex_core::track::Track;
 use tinex_core::{ProcessArgs, Tinex, TinexNotification, TinexRequest};
+
+#[test]
+fn lifecycle_visibility_and_unchanged_ticks_do_not_request_redraws() {
+    let mut visibility = Visibility::default();
+    assert!(!visibility.visible());
+    visibility.active = true;
+    assert!(visibility.visible());
+    visibility.occluded = true;
+    assert!(!visibility.visible());
+    visibility.occluded = false;
+    visibility.zero_size = true;
+    assert!(!visibility.visible());
+    visibility.zero_size = false;
+    visibility.active = false;
+    assert!(!visibility.visible());
+    assert!(matches!(changed_result(false), MessageResult::Nop));
+    assert!(matches!(changed_result(true), MessageResult::Action(())));
+}
+
+#[test]
+fn asynchronous_wakeups_wait_for_acknowledgement_instead_of_accumulating() {
+    use xilem::core::{SendMessage, ViewId, fork};
+    let (sender, receiver) = mpsc::channel();
+    let (_driver, _windows) = Xilem::new_simple(
+        (),
+        |_| {
+            fork(
+                xilem::view::label("Polling test"),
+                polling(|_: &mut ()| (false, NOTIFICATION_POLL_INTERVAL)),
+            )
+        },
+        WindowOptions::new("Test"),
+    )
+    .into_driver_and_windows(move |event| sender.send(event).map_err(|err| err.0));
+    let first = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    // A delayed GUI must not accumulate timer messages or catch-up bursts.
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(60)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    let MasonryUserEvent::Action(_, action, id) = first else {
+        panic!("expected wakeup");
+    };
+    assert_eq!(id, xilem::ASYNC_MARKER_WIDGET);
+    let (_, message) = *action.downcast::<(Arc<[ViewId]>, SendMessage)>().unwrap();
+    let ack = *message
+        .downcast::<xilem::tokio::sync::oneshot::Sender<Duration>>()
+        .unwrap();
+    ack.send(NOTIFICATION_POLL_INTERVAL).unwrap();
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        MasonryUserEvent::Action(..)
+    ));
+    // Dropping the receiver/driver terminates the source; it owns no engine data.
+}
 
 // These notification-only tests do not run an engine request consumer.
 fn poll_notifications(state: &mut AppState, notifications: &Receiver<TinexNotification>) -> bool {
@@ -156,7 +211,6 @@ fn arming_dispatch_settles_queued_confirmation_before_the_next_toggle() {
 
 #[test]
 fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
-    use tinex_widgets::Widget;
     let (sender, requests) = mpsc::channel();
     let (notifications, receiver) = mpsc::channel();
     let mut engine = Tinex::new(requests, notifications).unwrap();
@@ -216,23 +270,8 @@ fn track_plugin_list_follows_engine_confirmation_and_chain_order() {
     assert!(state.tracks[0].pending_plugins.is_empty());
     assert!(state.tracks[1].plugins.is_empty());
 
-    let Widget::Column(page) = view::view(&state) else {
-        panic!("expected page")
-    };
-    let Widget::Scroll { child, .. } = &page[1] else {
-        panic!("expected scrolling content")
-    };
-    let Widget::Column(content) = &**child else {
-        panic!("expected column")
-    };
-    for (row, expected) in content[3..].iter().zip(["EPiano", "Delay", "EPiano"]) {
-        let Widget::Row { children, .. } = row else {
-            panic!("expected plugin row")
-        };
-        assert!(matches!(&children[0], Widget::Label { text, .. } if text == expected));
-    }
-    assert_eq!(content.len(), 6);
-    assert!(matches!(page[2], Widget::StatusBar(_)));
+    // Xilem presentation/order and the fixed footer are covered by the
+    // headless view harness tests; this test owns the engine round trip.
 
     send_actions(
         &mut state,
@@ -576,21 +615,6 @@ fn sampling_send_failure_disconnects_without_losing_queued_confirmations() {
     assert!(!state.level_request_in_flight);
     assert_eq!(state.tracks[0].output_level, 0.0);
     assert!(state.level_request_buffer.is_empty());
-}
-
-#[test]
-fn physical_pointer_coordinates_match_logical_layout_at_hidpi() {
-    let state = AppState::default();
-    let mut ui = Ui::new(view::view(&state), Size::new(400.0, 280.0));
-    ui.input(Input::PointerMoved(logical_point(
-        PhysicalPosition::new(80.0, 80.0),
-        2.0,
-    )));
-    assert!(ui.input(Input::PointerPressed).is_empty());
-    assert!(matches!(
-        ui.input(Input::PointerReleased).as_slice(),
-        [UiAction::CreateTrack]
-    ));
 }
 
 #[test]

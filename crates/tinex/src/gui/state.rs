@@ -1,18 +1,13 @@
 use std::collections::HashMap;
 
 use tinex_core::{plugin::PluginInstanceId, track::TrackId};
-use tinex_widgets::WidgetId;
 
 pub(super) struct UiTrack {
     pub id: TrackId,
     pub name: String,
     pub number: u64,
-    pub row: WidgetId,
-    pub delete_button: WidgetId,
-    pub arm_button: WidgetId,
     /// Confirmed membership in the engine's armed-track set.
     pub armed: bool,
-    pub volume_slider: WidgetId,
     /// Requested dB setting; -61 represents silence.
     pub volume_db: f32,
     pub deleting: bool,
@@ -30,8 +25,6 @@ pub(super) struct UiTrack {
 pub(super) struct UiPluginInstance {
     pub id: PluginInstanceId,
     pub name: &'static str,
-    pub delete_button: WidgetId,
-    pub insert_before_button: WidgetId,
     pub deleting: bool,
 }
 
@@ -50,20 +43,12 @@ pub(super) enum Page {
 
 pub(super) struct AppState {
     pub page: Page,
-    pub back_button: WidgetId,
-    pub track_page: WidgetId,
-    pub add_plugin_button: WidgetId,
-    pub plugin_page: WidgetId,
-    pub plugin_back_button: WidgetId,
-    pub plugin_buttons: [WidgetId; tinex_plugins::FACTORY.len()],
     pub sample_rate: f32,
     pub tracks: Vec<UiTrack>,
     pub pending: HashMap<TrackId, PendingTrack>,
     pub next_number: u64,
     pub connected: bool,
     pub message: Option<String>,
-    pub create_button: WidgetId,
-    pub track_list: WidgetId,
     /// Linear, exponentially weighted peak of the engine's combined output.
     pub master_output_level: f32,
     /// JACK CPU utilization percentage, rounded to one decimal for display.
@@ -79,20 +64,12 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             page: Page::Main,
-            back_button: WidgetId::new(),
-            track_page: WidgetId::new(),
-            add_plugin_button: WidgetId::new(),
-            plugin_page: WidgetId::new(),
-            plugin_back_button: WidgetId::new(),
-            plugin_buttons: std::array::from_fn(|_| WidgetId::new()),
             sample_rate: 48_000.0,
             tracks: Vec::new(),
             pending: HashMap::new(),
             next_number: 1,
             connected: true,
             message: None,
-            create_button: WidgetId::new(),
-            track_list: WidgetId::new(),
             master_output_level: 0.0,
             cpu_load: None,
             level_request_in_flight: false,

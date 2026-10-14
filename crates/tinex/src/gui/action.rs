@@ -3,7 +3,7 @@ use tinex_core::track::TrackId;
 use tinex_core::{TinexNotification, TinexRequest};
 
 /// Only semantic, cloneable application actions are attached to widgets.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum UiAction {
     SetTrackVolume {
         track_id: TrackId,

@@ -8,7 +8,7 @@ fn arming_replaces_the_set_and_waits_for_confirmation() {
     let second = create(&mut state);
     confirm(&mut state, first.id());
     confirm(&mut state, second.id());
-    let button = state.tracks[0].arm_button;
+    let button = state.tracks[0].id;
     state.page = Page::Track(first.id());
     for (id, expected, confirmed) in [
         (first.id(), [first.id()].into(), [true, false]),
@@ -47,7 +47,7 @@ fn arming_replaces_the_set_and_waits_for_confirmation() {
         );
         assert!(!update(&mut state, notification()).changed);
         assert_eq!(state.page, Page::Track(first.id()));
-        assert_eq!(state.tracks[0].arm_button, button);
+        assert_eq!(state.tracks[0].id, button);
     }
 }
 
@@ -233,7 +233,7 @@ fn deletion_waits_for_confirmation_and_does_not_rename_survivors() {
     let second = create(&mut state);
     confirm(&mut state, first.id());
     confirm(&mut state, second.id());
-    let survivor_widget = state.tracks[1].delete_button;
+    let survivor_id = state.tracks[1].id;
     let result = update(&mut state, Action::Ui(UiAction::DeleteTrack(first.id())));
     assert!(matches!(result.effects[0].request, TinexRequest::DeleteTrack(id) if id == first.id()));
     assert_eq!(state.tracks.len(), 2);
@@ -249,7 +249,7 @@ fn deletion_waits_for_confirmation_and_does_not_rename_survivors() {
     );
     assert_eq!(state.tracks.len(), 1);
     assert_eq!(state.tracks[0].name, "Track 2");
-    assert_eq!(state.tracks[0].delete_button, survivor_widget);
+    assert_eq!(state.tracks[0].id, survivor_id);
     let third = create(&mut state);
     confirm(&mut state, third.id());
     assert_eq!(state.tracks[1].name, "Track 3");
@@ -339,11 +339,11 @@ fn only_confirmed_deletion_of_the_selected_track_returns_to_main() {
 }
 
 #[test]
-fn level_responses_preserve_navigation_and_widget_identity() {
+fn level_responses_preserve_navigation_and_track_identity() {
     let mut state = AppState::default();
     let track = create(&mut state);
     confirm(&mut state, track.id());
-    let row = state.tracks[0].row;
+    let row = state.tracks[0].id;
     update(&mut state, Action::Ui(UiAction::OpenTrack(track.id())));
     assert_eq!(update(&mut state, Action::SampleLevels).effects.len(), 1);
     update(
@@ -355,7 +355,7 @@ fn level_responses_preserve_navigation_and_widget_identity() {
     );
     assert_eq!(state.page, Page::Track(track.id()));
     assert_eq!(state.tracks[0].output_level, 2.0);
-    assert_eq!(state.tracks[0].row, row);
+    assert_eq!(state.tracks[0].id, row);
 }
 
 #[test]
@@ -411,7 +411,7 @@ fn volume_changes_use_linear_gain_and_affect_only_the_requested_track() {
     confirm(&mut state, first.id());
     confirm(&mut state, second.id());
     assert_eq!(state.tracks[0].volume_db, 0.0);
-    let slider_id = state.tracks[0].volume_slider;
+    let track_id = state.tracks[0].id;
     for (db, gain) in [
         (-61.0, 0.0),
         (-60.0, 0.001),
@@ -433,7 +433,7 @@ fn volume_changes_use_linear_gain_and_affect_only_the_requested_track() {
             if *id == first.id() && (*value - gain).abs() < 1e-6)
         );
         assert_eq!(state.tracks[0].volume_db, db);
-        assert_eq!(state.tracks[0].volume_slider, slider_id);
+        assert_eq!(state.tracks[0].id, track_id);
         assert_eq!(state.tracks[1].volume_db, 0.0);
         let repeated = update(
             &mut state,
@@ -703,7 +703,7 @@ fn plugin_deletion_waits_for_confirmation_and_preserves_other_instances() {
     let survivor = add_confirmed_plugin(&mut state, first.id());
     let other = add_confirmed_plugin(&mut state, second.id());
     state.page = Page::Track(first.id());
-    let button = state.tracks[0].plugins[1].delete_button;
+    let button = state.tracks[0].plugins[1].id;
     let action = UiAction::DeletePlugin {
         track_id: first.id(),
         plugin_id: removed.id(),
@@ -746,7 +746,7 @@ fn plugin_deletion_waits_for_confirmation_and_preserves_other_instances() {
         .changed
     );
     assert_eq!(state.tracks[0].plugins[0].id, survivor.id());
-    assert_eq!(state.tracks[0].plugins[0].delete_button, button);
+    assert_eq!(state.tracks[0].plugins[0].id, button);
     assert_eq!(state.tracks[1].plugins[0].id, other.id());
     assert_eq!(state.page, Page::Track(first.id()));
     assert!(update(&mut state, Action::Ui(action)).effects.is_empty());

@@ -1,6 +1,6 @@
 use tinex_core::track::Track;
 use tinex_core::{TinexNotification, TinexRequest};
-use tinex_widgets::{WidgetId, sanitize_level};
+use tinex_widgets::sanitize_level;
 
 use crate::gui::state::UiPluginInstance;
 
@@ -132,8 +132,6 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                         UiPluginInstance {
                             id: plugin_id,
                             name: builder.name(),
-                            delete_button: WidgetId::new(),
-                            insert_before_button: WidgetId::new(),
                             deleting: false,
                         },
                     );
@@ -239,11 +237,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     id,
                     name: pending.name,
                     number: pending.number,
-                    row: WidgetId::new(),
-                    delete_button: WidgetId::new(),
-                    arm_button: WidgetId::new(),
                     armed: false,
-                    volume_slider: WidgetId::new(),
                     volume_db: 0.0,
                     deleting: false,
                     plugins: Vec::new(),

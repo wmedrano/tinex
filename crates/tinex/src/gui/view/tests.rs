@@ -1,19 +1,24 @@
+use super::testing::Session;
 use super::*;
-use crate::gui::theme::Theme;
-use tinex_widgets::TextRenderer;
-use vello::Scene;
-use vello::kurbo::Size;
+use crate::gui::{action::Action, state::UiPluginInstance, update::update};
+use masonry::{
+    core::{
+        TextEvent, WidgetId,
+        keyboard::{Key, NamedKey},
+    },
+    kurbo::{Rect, Size, Vec2},
+    widgets::{Flex, Portal, SizedBox, Slider},
+};
+use tinex_core::{TinexNotification, TinexRequest, plugin::PluginInstanceId, track::TrackId};
 
-fn confirmed_tracks(count: usize) -> AppState {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
+fn tracks(count: usize) -> AppState {
     let mut state = AppState::default();
     for _ in 0..count {
         let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
             .effects
             .remove(0);
         let TinexRequest::NewTrack(track) = effect.request else {
-            panic!("expected track")
+            unreachable!()
         };
         update(
             &mut state,
@@ -23,1423 +28,1019 @@ fn confirmed_tracks(count: usize) -> AppState {
     state
 }
 
-fn arm_buttons(widget: &Widget<UiAction>) -> Vec<(&str, bool, tinex_widgets::WidgetId, bool)> {
-    match widget {
-        Widget::Button {
-            id,
-            label,
-            enabled,
-            selected,
-            action: UiAction::ToggleTrackArm(_),
-            ..
-        } => {
-            vec![(label.as_str(), *enabled, *id, *selected)]
-        }
-        Widget::Row { children, .. }
-        | Widget::ClickableRow { children, .. }
-        | Widget::Column(children)
-        | Widget::StatusBar(children) => children.iter().flat_map(arm_buttons).collect(),
-        Widget::Scroll { child, .. } => arm_buttons(child),
-        _ => Vec::new(),
+fn plugin(name: &'static str) -> UiPluginInstance {
+    UiPluginInstance {
+        id: PluginInstanceId::new(),
+        name,
+        deleting: false,
     }
 }
 
-#[test]
-fn armed_button_color_remains_distinct_when_hovered_pressed_or_disabled() {
-    use tinex_widgets::{Input, Ui};
-    use vello::kurbo::Point;
+fn rect<V: WidgetView<AppState, UiAction>>(ui: &Session<V>, id: WidgetId) -> Rect {
+    ui.harness.get_widget_with_id(id).ctx().bounding_rect()
+}
 
-    let mut state = confirmed_tracks(1);
-    let theme = Theme::default();
-    let mut text = TextRenderer::new();
-    for (enabled, hovered, pressed) in [
-        (true, false, false),
-        (true, true, false),
-        (true, true, true),
-        (false, true, false),
+fn scroll_control_into_view<V: WidgetView<AppState, UiAction>>(
+    ui: &mut Session<V>,
+    id: WidgetId,
+    scale: f64,
+) {
+    let portal = ui.widgets::<Portal<Flex>>()[0];
+    let viewport = rect(ui, portal);
+    let center = viewport.center();
+    ui.harness.mouse_move((center.x * scale, center.y * scale));
+    for _ in 0..50 {
+        let bounds = rect(ui, id);
+        if viewport.contains_rect(bounds) {
+            return;
+        }
+        // Small wheel steps avoid skipping an entire short viewport at HiDPI.
+        let delta = if bounds.y0 < viewport.y0 { 24.0 } else { -24.0 };
+        ui.harness.mouse_wheel(Vec2::new(0.0, delta * scale));
+    }
+    panic!(
+        "control {:?} never entered viewport {viewport:?}",
+        rect(ui, id)
+    );
+}
+
+#[test]
+fn create_and_track_controls_emit_semantic_actions_without_mutating_state() {
+    let state = tracks(1);
+    let id = state.tracks[0].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    for (text, expected) in [
+        ("Create Track", UiAction::CreateTrack),
+        ("Track 1", UiAction::OpenTrack(id)),
+        ("Delete", UiAction::DeleteTrack(id)),
+        ("Arm", UiAction::ToggleTrackArm(id)),
     ] {
-        state.arm_request_in_flight = !enabled;
-        let mut paints = Vec::new();
-        for armed in [false, true] {
-            state.tracks[0].armed = armed;
-            let control = track_arm_control(&state, &state.tracks[0]);
-            assert_eq!(arm_buttons(&control)[0].0, "Arm");
-            let mut ui = Ui::new(control, Size::new(400.0, 280.0));
-            if hovered {
-                ui.input(Input::PointerMoved(Point::new(50.0, 34.0)));
-            }
-            if pressed {
-                ui.input(Input::PointerPressed);
-            }
-            let mut scene = Scene::new();
-            ui.render(&mut scene, &mut text, &theme.widgets, 1.0);
-            paints.push(scene.encoding().draw_data.clone());
-        }
-        assert_ne!(
-            paints[0], paints[1],
-            "armed color lost for enabled={enabled}, hovered={hovered}, pressed={pressed}"
-        );
-    }
-}
-
-#[test]
-fn arm_controls_support_pointer_keyboard_confirmation_and_disabled_precedence() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
-        for scale in [1.0, 2.0] {
-            for main_page in [true, false] {
-                let mut state = confirmed_tracks(2);
-                let id = state.tracks[0].id;
-                let button = state.tracks[0].arm_button;
-                let (page, point, tabs) = if main_page {
-                    (Page::Main, Point::new(76.0, 194.0), 4)
-                } else {
-                    (Page::Track(id), Point::new(220.0, 186.0), 4)
-                };
-                state.page = page;
-                update(
-                    &mut state,
-                    Action::Notification(TinexNotification::ArmTracks(Default::default())),
-                );
-                let mut ui = Ui::new(view(&state), size);
-                let physical = Point::new(point.x * scale, point.y * scale);
-                let logical = Point::new(physical.x / scale, physical.y / scale);
-                ui.input(Input::PointerMoved(logical));
-                ui.input(Input::PointerPressed);
-                let actions = ui.input(Input::PointerReleased);
-                assert!(
-                    matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
-                );
-                let result = update(&mut state, Action::Ui(actions[0]));
-                assert!(
-                    matches!(&result.effects[0].request, TinexRequest::ArmTracks(ids) if *ids == [id].into())
-                );
-                assert_eq!(state.page, page);
-                assert!(!state.tracks[0].armed);
-                assert!(
-                    arm_buttons(&view(&state))
-                        .iter()
-                        .all(|(label, enabled, _, selected)| *label == "Arm"
-                            && !enabled
-                            && !selected)
-                );
-                ui.set_view(view(&state), size);
-                ui.input(Input::PointerPressed);
-                assert!(ui.input(Input::PointerReleased).is_empty());
-
-                update(
-                    &mut state,
-                    Action::Notification(TinexNotification::ArmTracks([id].into())),
-                );
-                assert_eq!(arm_buttons(&view(&state))[0], ("Arm", true, button, true));
-                ui.set_view(view(&state), size);
-                // Both activation keys reach the arm control through Tab navigation.
-                for key in [ActivationKey::Enter, ActivationKey::Space] {
-                    ui.input(Input::Cancel);
-                    for _ in 0..tabs {
-                        ui.input(Input::Tab { backwards: false });
-                    }
-                    ui.input(Input::Key {
-                        key,
-                        pressed: true,
-                        repeat: false,
-                    });
-                    let actions = ui.input(Input::Key {
-                        key,
-                        pressed: false,
-                        repeat: false,
-                    });
-                    assert!(
-                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
-                    );
-                    let result = update(&mut state, Action::Ui(actions[0]));
-                    assert!(
-                        matches!(&result.effects[0].request, TinexRequest::ArmTracks(ids) if ids.is_empty())
-                    );
-                    assert!(state.tracks[0].armed);
-                    update(
-                        &mut state,
-                        Action::Notification(TinexNotification::ArmTracks([id].into())),
-                    );
-                    ui.set_view(view(&state), size);
-                }
-
-                for disconnected in [false, true] {
-                    state.tracks[0].deleting = !disconnected;
-                    if disconnected {
-                        update(&mut state, Action::Disconnected);
-                    }
-                    ui.set_view(view(&state), size);
-                    assert_eq!(arm_buttons(&view(&state))[0], ("Arm", false, button, true));
-                    ui.input(Input::PointerMoved(logical));
-                    ui.input(Input::PointerPressed);
-                    assert!(ui.input(Input::PointerReleased).is_empty());
-                    assert_eq!(state.page, page);
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn scrolling_track_cards_preserves_the_footer_and_targets_the_visible_track() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::TinexNotification;
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
-        for scale in [1.0, 2.0] {
-            for count in [0, 10] {
-                let mut state = confirmed_tracks(count);
-                let mut ui = Ui::new(view(&state), size);
-                let mut text = TextRenderer::new();
-                let theme = Theme::default();
-                let mut scene = Scene::new();
-                ui.render(&mut scene, &mut text, &theme.widgets, scale);
-                // The final two text runs belong to Master and CPU.
-                let footer: Vec<_> = scene
-                    .encoding()
-                    .resources
-                    .glyph_runs
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .map(|run| run.transform)
-                    .collect();
-                assert_eq!(footer.len(), 2);
-                assert!(
-                    footer.iter().all(|transform| transform.translation[1]
-                        == ((size.height - 26.0) * scale) as f32),
-                    "footer positions: {footer:?}; size: {size:?}; count: {count}"
-                );
-                ui.input(Input::PointerMoved(Point::new(36.0, 100.0)));
-                ui.input(Input::Scroll(10_000.0));
-                ui.set_view(view(&state), size);
-                scene.reset();
-                ui.render(&mut scene, &mut text, &theme.widgets, scale);
-                let scrolled_footer: Vec<_> = scene
-                    .encoding()
-                    .resources
-                    .glyph_runs
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .map(|run| run.transform)
-                    .collect();
-                assert_eq!(scrolled_footer, footer);
-                // Track controls cannot receive clicks through the fixed footer.
-                for x in [1.0, 156.0, size.width - 1.0] {
-                    ui.input(Input::PointerMoved(Point::new(x, size.height - 16.0)));
-                    ui.input(Input::PointerPressed);
-                    assert!(ui.input(Input::PointerReleased).is_empty());
-                }
-                if let Some(track) = state.tracks.last() {
-                    let id = track.id;
-                    let button = track.arm_button;
-                    ui.input(Input::PointerMoved(Point::new(76.0, size.height - 74.0)));
-                    ui.input(Input::PointerPressed);
-                    let actions = ui.input(Input::PointerReleased);
-                    assert!(
-                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
-                    );
-                    update(&mut state, Action::Ui(actions[0]));
-                    update(
-                        &mut state,
-                        Action::Notification(TinexNotification::ArmTracks([id].into())),
-                    );
-                    ui.set_view(view(&state), size);
-                    assert_eq!(
-                        arm_buttons(&view(&state)).last().copied(),
-                        Some(("Arm", true, button, true))
-                    );
-                    // Confirmation rebuilds keep focus and scroll on the same control.
-                    ui.input(Input::Key {
-                        key: ActivationKey::Enter,
-                        pressed: true,
-                        repeat: false,
-                    });
-                    let actions = ui.input(Input::Key {
-                        key: ActivationKey::Enter,
-                        pressed: false,
-                        repeat: false,
-                    });
-                    assert!(
-                        matches!(actions.as_slice(), [UiAction::ToggleTrackArm(track)] if *track == id)
-                    );
-                    assert_eq!(state.page, Page::Main);
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn cpu_meter_is_in_the_shared_footer_on_every_page() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track");
-    };
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(track.id())),
-    );
-    for page in [
-        Page::Main,
-        Page::Track(track.id()),
-        Page::Plugins(track.id(), u16::MAX),
-    ] {
-        state.page = page;
-        for load in [None, Some(0.0), Some(12.3), Some(100.0)] {
-            state.cpu_load = load;
-            let Widget::Column(children) = view(&state) else {
-                panic!("expected column")
-            };
-            let Widget::StatusBar(footer) = children.last().unwrap() else {
-                panic!("expected footer")
-            };
-            assert_eq!(footer.len(), 5);
-            assert!(matches!(
-                &footer[4],
-                Widget::PercentageMeter { percentage, width: 88.0 }
-                    if *percentage == load.map_or(0.0, f64::from)
-            ));
-            assert!(
-                matches!(&footer[3], Widget::Label { text, width: Some(32.0), .. } if text == "CPU")
-            );
-            for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
-                let ui = tinex_widgets::Ui::new(view(&state), size);
-                let mut scene = Scene::new();
-                ui.render(
-                    &mut scene,
-                    &mut TextRenderer::new(),
-                    &Theme::default().widgets,
-                    2.0,
-                );
-                assert!(!scene.encoding().resources.glyph_runs.is_empty());
-                assert!(
-                    scene
-                        .encoding()
-                        .resources
-                        .glyphs
-                        .iter()
-                        .all(|glyph| glyph.id != 0)
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn confirmed_rows_emit_delete_actions_and_pending_rows_disable_them() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{Input, Ui};
-    use vello::kurbo::Point;
-
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected create");
-    };
-    let size = Size::new(400.0, 280.0);
-    let mut ui = Ui::new(view(&state), size);
-    let delete_position = Point::new(184.0, 194.0);
-    ui.input(Input::PointerMoved(delete_position));
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty());
-
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(track.id())),
-    );
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerPressed);
-    let actions = ui.input(Input::PointerReleased);
-    assert!(matches!(actions.as_slice(), [UiAction::DeleteTrack(id)] if *id == track.id()));
-    update(&mut state, Action::Ui(actions[0]));
-    assert_eq!(state.page, Page::Main); // Delete is not a navigation click.
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty());
-    let mut scene = Scene::new();
-    ui.render(
-        &mut scene,
-        &mut TextRenderer::new(),
-        &Theme::default().widgets,
-        1.0,
-    );
-    assert!(!scene.encoding().resources.glyph_runs.is_empty());
-    assert!(
-        scene
-            .encoding()
-            .resources
-            .glyphs
-            .iter()
-            .all(|glyph| glyph.id != 0)
-    );
-}
-
-#[test]
-fn meter_bars_render_silence_hot_and_over_range_values_at_hidpi() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest};
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected create");
-    };
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(track.id())),
-    );
-    let mut text = TextRenderer::new();
-    let theme = Theme::default();
-    for level in [0.0, 0.5, 1.0, 2.0, 16.0, f32::INFINITY, f32::NAN] {
-        state.tracks[0].output_level = level;
-        state.master_output_level = level;
-        let ui = tinex_widgets::Ui::new(view(&state), Size::new(400.0, 280.0));
-        let mut scene = Scene::new();
-        ui.render(&mut scene, &mut text, &theme.widgets, 2.0);
-        assert!(!scene.encoding().is_empty());
+        let button = ui.button(text);
+        ui.harness.mouse_click_on(button);
+        assert_eq!(ui.action(), Some(expected));
         assert!(
-            scene
-                .encoding()
-                .resources
-                .glyphs
+            ui.action().is_none(),
+            "nested control must emit only one action"
+        );
+    }
+    assert_eq!(ui.state.lock().unwrap().page, Page::Main);
+    assert!(!ui.state.lock().unwrap().tracks[0].deleting);
+}
+
+#[test]
+fn disabled_nested_controls_never_open_a_track_and_navigation_remains_local() {
+    let mut state = tracks(1);
+    state.connected = false;
+    let id = state.tracks[0].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    for text in ["Create Track", "Delete", "Arm"] {
+        let button = ui.button(text);
+        assert!(ui.harness.get_widget_with_id(button).ctx().is_disabled());
+        ui.harness.mouse_click_on(button);
+        assert!(ui.action().is_none());
+    }
+    let open = ui.button("Track 1");
+    ui.harness.mouse_click_on(open);
+    assert_eq!(ui.action(), Some(UiAction::OpenTrack(id)));
+    assert!(ui.action().is_none());
+}
+
+#[test]
+fn physical_pointer_events_activate_the_same_controls_at_multiple_display_scales() {
+    for scale in [1.0, 1.5, 2.0] {
+        let session = Session::new(
+            tracks(1),
+            view,
+            Size::new(800.0 * scale, 450.0 * scale),
+            scale,
+        );
+        let mut ui = session.borrow_mut();
+        let create = ui.button("Create Track");
+        let center = rect(&ui, create).center();
+        // The 0.4 harness's convenience mouse_click_on does not apply scale;
+        // send physical coordinates as the native backend would.
+        ui.harness.mouse_move((center.x * scale, center.y * scale));
+        ui.harness
+            .mouse_button_press(masonry::core::PointerButton::Primary);
+        ui.harness
+            .mouse_button_release(masonry::core::PointerButton::Primary);
+        assert_eq!(ui.action(), Some(UiAction::CreateTrack));
+        assert!(ui.action().is_none());
+    }
+}
+
+#[test]
+fn tab_shift_tab_enter_and_space_activate_controls() {
+    let session = Session::new(tracks(1), view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    let create = ui.button("Create Track");
+    ui.harness.focus_on(None);
+    ui.harness.press_tab_key(false);
+    assert_eq!(ui.harness.focused_widget_id(), Some(create));
+    for key in [Key::Named(NamedKey::Enter), Key::Character(" ".into())] {
+        ui.harness
+            .process_text_event(TextEvent::key_down(key.clone()));
+        ui.harness.process_text_event(TextEvent::key_up(key));
+        assert_eq!(ui.action(), Some(UiAction::CreateTrack));
+    }
+    ui.harness.press_tab_key(false);
+    let track = ui.button("Track 1");
+    assert_eq!(ui.harness.focused_widget_id(), Some(track));
+    ui.harness.press_tab_key(true);
+    assert_eq!(ui.harness.focused_widget_id(), Some(create));
+}
+
+#[test]
+fn slider_supports_arrows_home_end_pointer_and_disabled_behavior() {
+    let state = tracks(1);
+    let id = state.tracks[0].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    {
+        let mut ui = session.borrow_mut();
+        let slider = ui.widgets::<Slider>()[0];
+        ui.harness.focus_on(Some(slider));
+        for (key, db) in [
+            (NamedKey::ArrowLeft, -1.0),
+            (NamedKey::ArrowRight, 0.0),
+            (NamedKey::Home, -61.0),
+            (NamedKey::End, 12.0),
+        ] {
+            ui.harness
+                .process_text_event(TextEvent::key_down(Key::Named(key)));
+            assert_eq!(
+                ui.action(),
+                Some(UiAction::SetTrackVolume { track_id: id, db })
+            );
+        }
+        ui.harness.mouse_click_on(slider);
+        assert!(
+            matches!(ui.action(), Some(UiAction::SetTrackVolume { track_id, db }) if track_id == id && db.is_finite() && (-61.0..=12.0).contains(&db))
+        );
+        assert!(ui.action().is_none());
+        ui.state.lock().unwrap().tracks[0].deleting = true;
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    let slider = ui.widgets::<Slider>()[0];
+    ui.harness.mouse_click_on(slider);
+    assert!(ui.action().is_none());
+}
+
+#[test]
+fn plugin_pages_show_confirmation_order_and_per_instance_delete_and_insert_actions() {
+    let mut state = tracks(1);
+    let id = state.tracks[0].id;
+    state.page = Page::Track(id);
+    state.tracks[0].plugins = vec![plugin("EPiano"), plugin("Delay"), plugin("EPiano")];
+    let first = state.tracks[0].plugins[0].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    let names: Vec<_> = ui
+        .labels()
+        .into_iter()
+        .filter(|s| s == "EPiano" || s == "Delay")
+        .collect();
+    assert_eq!(names, ["EPiano", "Delay", "EPiano"]);
+    let delete = ui.button("Delete");
+    ui.harness.mouse_click_on(delete);
+    assert_eq!(
+        ui.action(),
+        Some(UiAction::DeletePlugin {
+            track_id: id,
+            plugin_id: first
+        })
+    );
+    let insert = ui.button("Insert Before");
+    ui.harness.mouse_click_on(insert);
+    assert_eq!(
+        ui.action(),
+        Some(UiAction::OpenPlugins {
+            track_id: id,
+            index: 0
+        })
+    );
+    let add = ui.button("Add Plugin");
+    ui.harness.mouse_click_on(add);
+    assert_eq!(
+        ui.action(),
+        Some(UiAction::OpenPlugins {
+            track_id: id,
+            index: u16::MAX
+        })
+    );
+    ui.state.lock().unwrap().page = Page::Plugins(id, 0);
+    drop(ui);
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert!(ui.labels().iter().any(|s| s.starts_with("Insert Plugin")));
+    for (index, factory) in tinex_plugins::FACTORY.iter().enumerate() {
+        let choice = ui.button(factory.name());
+        scroll_control_into_view(&mut ui, choice, 1.0);
+        ui.harness.mouse_click_on(choice);
+        assert_eq!(
+            ui.action(),
+            Some(UiAction::AddPlugin {
+                track_id: id,
+                index
+            })
+        );
+    }
+    ui.state.lock().unwrap().connected = false;
+    drop(ui);
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    let choice = ui.button(tinex_plugins::FACTORY[0].name());
+    scroll_control_into_view(&mut ui, choice, 1.0);
+    ui.harness.mouse_click_on(choice);
+    assert!(ui.action().is_none());
+    let back = ui.button("Back to Track");
+    ui.harness.mouse_click_on(back);
+    assert_eq!(ui.action(), Some(UiAction::OpenTrack(id)));
+}
+
+#[test]
+fn plugin_picker_describes_the_confirmed_insertion_or_append_destination() {
+    for (index, title, destination) in [
+        (0, "Insert Plugin", "Before 01 · EPiano"),
+        (1, "Insert Plugin", "Before 02 · Delay"),
+        (2, "Insert Plugin", "Before 03 · EPiano"),
+        (3, "Add Plugin", "At the end of the chain · position 04"),
+        (99, "Add Plugin", "At the end of the chain · position 04"),
+        (
+            u16::MAX,
+            "Add Plugin",
+            "At the end of the chain · position 04",
+        ),
+    ] {
+        let mut state = tracks(1);
+        state.page = Page::Plugins(state.tracks[0].id, index);
+        state.tracks[0].plugins = vec![plugin("EPiano"), plugin("Delay"), plugin("EPiano")];
+        let pending = plugin("Unconfirmed plugin");
+        state.tracks[0].pending_plugins.insert(pending.id, pending);
+        let session = Session::new(state, view, Size::new(400.0, 450.0), 1.0);
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        assert!(labels.contains(&title.into()));
+        assert!(labels.contains(&destination.into()));
+        assert!(labels.contains(&"Track · Track 1".into()));
+        assert!(labels.contains(&"Instruments · 2".into()));
+        assert!(labels.contains(&"Effects · 4".into()));
+        assert!(
+            !labels
                 .iter()
-                .all(|glyph| glyph.id != 0 && glyph.x.is_finite() && glyph.y.is_finite())
+                .any(|text| text.contains("Unconfirmed plugin"))
+        );
+        for factory in &tinex_plugins::FACTORY {
+            assert!(labels.contains(&factory.description().into()));
+        }
+    }
+    let mut state = tracks(1);
+    state.page = Page::Plugins(state.tracks[0].id, u16::MAX);
+    let session = Session::new(state, view, Size::new(400.0, 450.0), 1.0);
+    assert!(
+        session
+            .borrow_mut()
+            .labels()
+            .contains(&"At the end of the chain · position 01".into())
+    );
+}
+
+#[test]
+fn plugin_picker_choices_fit_narrow_windows_and_keep_factory_indices_at_every_scale() {
+    for scale in [1.0, 2.0] {
+        for (width, height) in [(400.0, 280.0), (800.0, 450.0)] {
+            let mut state = tracks(1);
+            let track_id = state.tracks[0].id;
+            state.page = Page::Plugins(track_id, 0);
+            state.tracks[0].name =
+                "A very long track name that should not move picker controls off screen".into();
+            state.tracks[0].plugins = vec![plugin(
+                "A very long plugin name that should not resize the destination header",
+            )];
+            let session =
+                Session::new(state, view, Size::new(width * scale, height * scale), scale);
+            let (portal, offset, back, back_bounds, last_choice) = {
+                let mut ui = session.borrow_mut();
+                let back = ui.button("Back to Track");
+                let back_bounds = rect(&ui, back);
+                assert!(Rect::new(0.0, 0.0, width, height - 32.0).contains_rect(back_bounds));
+                let portal = ui.widgets::<Portal<Flex>>()[0];
+                let viewport = rect(&ui, portal);
+                ui.harness.focus_on(Some(back));
+                let mut last_choice = back;
+                for (index, factory) in tinex_plugins::FACTORY.iter().enumerate() {
+                    let choice = ui.button(factory.name());
+                    ui.harness.press_tab_key(false);
+                    assert_eq!(ui.harness.focused_widget_id(), Some(choice));
+                    scroll_control_into_view(&mut ui, choice, scale);
+                    let bounds = rect(&ui, choice);
+                    assert!(
+                        viewport.contains_rect(bounds),
+                        "{}: {bounds:?} in {viewport:?}",
+                        factory.name()
+                    );
+                    assert_eq!(bounds.width(), 132.0);
+                    assert_eq!(bounds.height(), 32.0);
+                    assert_eq!(rect(&ui, back), back_bounds);
+                    let center = bounds.center();
+                    ui.harness.mouse_move((center.x * scale, center.y * scale));
+                    ui.harness
+                        .mouse_button_press(masonry::core::PointerButton::Primary);
+                    ui.harness
+                        .mouse_button_release(masonry::core::PointerButton::Primary);
+                    assert_eq!(ui.action(), Some(UiAction::AddPlugin { track_id, index }));
+                    assert!(ui.action().is_none());
+                    for key in [Key::Named(NamedKey::Enter), Key::Character(" ".into())] {
+                        ui.harness
+                            .process_text_event(TextEvent::key_down(key.clone()));
+                        ui.harness.process_text_event(TextEvent::key_up(key));
+                        assert_eq!(ui.action(), Some(UiAction::AddPlugin { track_id, index }));
+                        assert!(ui.action().is_none());
+                    }
+                    last_choice = choice;
+                }
+                assert_eq!(ui.state.lock().unwrap().page, Page::Plugins(track_id, 0));
+                assert_eq!(ui.state.lock().unwrap().tracks[0].plugins.len(), 1);
+                assert!(
+                    ui.state.lock().unwrap().tracks[0]
+                        .pending_plugins
+                        .is_empty()
+                );
+                let offset = ui
+                    .harness
+                    .get_widget_with_id(portal)
+                    .downcast::<Portal<Flex>>()
+                    .unwrap()
+                    .inner()
+                    .get_viewport_pos();
+                assert!(offset.y > 0.0);
+                ui.state.lock().unwrap().master_output_level = 2.0;
+                ui.state.lock().unwrap().cpu_load = Some(42.5);
+                (portal, offset, back, back_bounds, last_choice)
+            };
+            Session::refresh(&session, view);
+            let mut ui = session.borrow_mut();
+            assert_eq!(ui.button("Back to Track"), back);
+            assert_eq!(rect(&ui, back), back_bounds);
+            assert_eq!(ui.harness.focused_widget_id(), Some(last_choice));
+            assert_eq!(
+                ui.harness
+                    .get_widget_with_id(portal)
+                    .downcast::<Portal<Flex>>()
+                    .unwrap()
+                    .inner()
+                    .get_viewport_pos(),
+                offset
+            );
+            ui.harness.press_tab_key(true);
+            assert_eq!(ui.harness.focused_widget_id(), Some(ui.button("Delay")));
+        }
+    }
+}
+
+#[test]
+fn plugin_picker_disables_all_choices_but_keeps_back_navigation_when_unavailable() {
+    for deleting in [false, true] {
+        let mut state = tracks(1);
+        let track_id = state.tracks[0].id;
+        state.page = Page::Plugins(track_id, u16::MAX);
+        state.connected = deleting;
+        state.tracks[0].deleting = deleting;
+        let session = Session::new(state, view, Size::new(400.0, 280.0), 1.0);
+        let mut ui = session.borrow_mut();
+        let message = if deleting {
+            "This track is being deleted. Adding plugins is unavailable."
+        } else {
+            "Audio engine disconnected. Adding plugins is unavailable."
+        };
+        assert!(ui.labels().contains(&message.into()));
+        for factory in &tinex_plugins::FACTORY {
+            let choice = ui.button(factory.name());
+            assert!(ui.harness.get_widget_with_id(choice).ctx().is_disabled());
+            scroll_control_into_view(&mut ui, choice, 1.0);
+            ui.harness.mouse_click_on(choice);
+            assert!(ui.action().is_none());
+        }
+        let back = ui.button("Back to Track");
+        assert!(!ui.harness.get_widget_with_id(back).ctx().is_disabled());
+        ui.harness.mouse_click_on(back);
+        assert_eq!(ui.action(), Some(UiAction::OpenTrack(track_id)));
+        ui.harness.focus_on(Some(back));
+        ui.harness
+            .process_text_event(TextEvent::key_down(Key::Named(NamedKey::Enter)));
+        ui.harness
+            .process_text_event(TextEvent::key_up(Key::Named(NamedKey::Enter)));
+        assert_eq!(ui.action(), Some(UiAction::OpenTrack(track_id)));
+    }
+}
+
+#[test]
+fn track_page_explains_empty_pending_and_disconnected_chains() {
+    let mut state = tracks(1);
+    let id = state.tracks[0].id;
+    state.page = Page::Track(id);
+    let session = Session::new(state, view, Size::new(400.0, 450.0), 1.0);
+    {
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        assert!(labels.contains(&"Plugin chain · 0".into()));
+        assert!(labels.contains(&"No plugins yet".into()));
+        assert!(
+            labels.contains(&"Add an instrument or effect to start building this track.".into())
+        );
+        let pending = plugin("Unconfirmed plugin");
+        ui.state.lock().unwrap().tracks[0]
+            .pending_plugins
+            .insert(pending.id, pending);
+    }
+    Session::refresh(&session, view);
+    {
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        assert!(labels.contains(&"Plugin chain · 0".into()));
+        assert!(labels.contains(&"Adding plugin…".into()));
+        assert!(!labels.contains(&"Unconfirmed plugin".into()));
+        assert!(!labels.contains(&"01".into()));
+        // Confirmed duplicates remain separate, numbered chain entries.
+        ui.state.lock().unwrap().tracks[0].plugins = vec![plugin("EPiano"), plugin("EPiano")];
+        update(&mut ui.state.lock().unwrap(), Action::Disconnected);
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    let labels = ui.labels();
+    assert!(labels.contains(&"Plugin chain · 2".into()));
+    assert!(labels.contains(&"01".into()));
+    assert!(labels.contains(&"02".into()));
+    assert_eq!(labels.iter().filter(|text| *text == "EPiano").count(), 2);
+    assert!(!labels.contains(&"Adding plugin…".into()));
+    assert!(labels.contains(&"Audio engine disconnected. Track controls are unavailable.".into()));
+    for text in ["Add Plugin", "Arm", "Insert Before", "Delete"] {
+        let button = ui.button(text);
+        assert!(ui.harness.get_widget_with_id(button).ctx().is_disabled());
+        ui.harness.mouse_click_on(button);
+        assert!(ui.action().is_none());
+    }
+    let slider = ui.widgets::<Slider>()[0];
+    assert!(ui.harness.get_widget_with_id(slider).ctx().is_disabled());
+    let back = ui.button("Back to Tracks");
+    ui.harness.focus_on(Some(back));
+    ui.harness
+        .process_text_event(TextEvent::key_down(Key::Named(NamedKey::Enter)));
+    ui.harness
+        .process_text_event(TextEvent::key_up(Key::Named(NamedKey::Enter)));
+    assert_eq!(ui.action(), Some(UiAction::BackToMain));
+    {
+        let mut state = ui.state.lock().unwrap();
+        state.connected = true;
+        state.tracks[0].deleting = true;
+    }
+    drop(ui);
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert!(ui.labels().contains(&"Deleting track…".into()));
+    for text in ["Add Plugin", "Arm", "Insert Before", "Delete"] {
+        let button = ui.button(text);
+        assert!(ui.harness.get_widget_with_id(button).ctx().is_disabled());
+        ui.harness.mouse_click_on(button);
+        assert!(ui.action().is_none());
+    }
+    let slider = ui.widgets::<Slider>()[0];
+    assert!(ui.harness.get_widget_with_id(slider).ctx().is_disabled());
+    let back = ui.button("Back to Tracks");
+    ui.harness.mouse_click_on(back);
+    assert_eq!(ui.action(), Some(UiAction::BackToMain));
+}
+
+#[test]
+fn track_chain_controls_fit_long_names_and_do_not_shift_during_deletion() {
+    for scale in [1.0, 2.0] {
+        for (width, height) in [(400.0, 280.0), (400.0, 450.0), (800.0, 450.0)] {
+            let mut state = tracks(1);
+            state.page = Page::Track(state.tracks[0].id);
+            state.tracks[0].name =
+                "A very long track name that should not displace any controls".into();
+            state.tracks[0].plugins = vec![
+                plugin("A very long plugin name that must stay inside its chain card"),
+                plugin("Delay"),
+            ];
+            let session =
+                Session::new(state, view, Size::new(width * scale, height * scale), scale);
+            let (before, name_bounds) = {
+                let mut ui = session.borrow_mut();
+                let portal = ui.widgets::<Portal<Flex>>()[0];
+                let viewport = rect(&ui, portal);
+                let window = Rect::new(0.0, 0.0, width, height - 32.0);
+                let mut before = Vec::new();
+                for text in [
+                    "Back to Tracks",
+                    "Arm",
+                    "Add Plugin",
+                    "Insert Before",
+                    "Delete",
+                ] {
+                    let id = ui.button(text);
+                    let bounds = rect(&ui, id);
+                    assert!(
+                        window.contains_rect(bounds),
+                        "{text}: {bounds:?} in {window:?}"
+                    );
+                    if matches!(text, "Insert Before" | "Delete") {
+                        assert!(
+                            viewport.contains_rect(bounds),
+                            "{text}: {bounds:?} in {viewport:?}"
+                        );
+                    }
+                    before.push((id, bounds));
+                }
+                let slider = ui.widgets::<Slider>()[0];
+                let bounds = rect(&ui, slider);
+                assert!(window.contains_rect(bounds));
+                assert!(bounds.width() >= 160.0, "usable slider: {bounds:?}");
+                before.push((slider, bounds));
+                let name = ui
+                    .widgets::<masonry::widgets::Label>()
+                    .into_iter()
+                    .find(|id| {
+                        ui.harness
+                            .get_widget_with_id(*id)
+                            .downcast::<masonry::widgets::Label>()
+                            .unwrap()
+                            .inner()
+                            .text()
+                            .starts_with("A very long plugin")
+                    })
+                    .unwrap();
+                let name_bounds = rect(&ui, name);
+                assert!(viewport.contains_rect(name_bounds));
+                assert!(name_bounds.width() >= 80.0);
+                assert!(name_bounds.x1 <= before[3].1.x0);
+                ui.state.lock().unwrap().tracks[0].plugins[0].deleting = true;
+                (before, (name, name_bounds))
+            };
+            Session::refresh(&session, view);
+            let mut ui = session.borrow_mut();
+            assert_eq!(ui.button("Deleting…"), before[4].0);
+            assert!(
+                ui.harness
+                    .get_widget_with_id(before[4].0)
+                    .ctx()
+                    .is_disabled()
+            );
+            for (id, bounds) in before {
+                assert_eq!(rect(&ui, id), bounds, "deletion must not shift controls");
+            }
+            assert_eq!(rect(&ui, name_bounds.0), name_bounds.1);
+            assert!(ui.labels().contains(&"Plugin chain · 2".into()));
+        }
+    }
+}
+
+#[test]
+fn track_controls_stay_fixed_and_chain_focus_survives_scrolling_and_meter_updates() {
+    for scale in [1.0, 2.0] {
+        let mut state = tracks(1);
+        let track_id = state.tracks[0].id;
+        state.page = Page::Track(track_id);
+        state.tracks[0].plugins = (0..12).map(|_| plugin("EPiano")).collect();
+        let session = Session::new(state, view, Size::new(400.0 * scale, 280.0 * scale), scale);
+        let (portal, offset, fixed, insert) = {
+            let mut ui = session.borrow_mut();
+            let mut fixed = Vec::new();
+            for text in ["Back to Tracks", "Arm", "Add Plugin"] {
+                let id = ui.button(text);
+                fixed.push((id, rect(&ui, id)));
+            }
+            let slider = ui.widgets::<Slider>()[0];
+            let meter = ui.widgets::<tinex_widgets::MeterWidget>()[0];
+            fixed.extend([(slider, rect(&ui, slider)), (meter, rect(&ui, meter))]);
+            let insert = ui.button("Insert Before");
+            let delete = ui.button("Delete");
+            ui.harness.focus_on(None);
+            for id in [fixed[0].0, fixed[1].0, slider, fixed[2].0, insert, delete] {
+                ui.harness.press_tab_key(false);
+                assert_eq!(ui.harness.focused_widget_id(), Some(id));
+            }
+            ui.harness.press_tab_key(true);
+            assert_eq!(ui.harness.focused_widget_id(), Some(insert));
+            let portal = ui.widgets::<Portal<Flex>>()[0];
+            let center = rect(&ui, portal).center();
+            ui.harness.mouse_move((center.x * scale, center.y * scale));
+            ui.harness.mouse_wheel(Vec2::new(0.0, -120.0 * scale));
+            let offset = ui
+                .harness
+                .get_widget_with_id(portal)
+                .downcast::<Portal<Flex>>()
+                .unwrap()
+                .inner()
+                .get_viewport_pos();
+            assert!(offset.y > 0.0);
+            for (id, bounds) in &fixed {
+                assert_eq!(rect(&ui, *id), *bounds);
+            }
+            ui.state.lock().unwrap().tracks[0].output_level = 1.5;
+            ui.state.lock().unwrap().master_output_level = 2.0;
+            ui.state.lock().unwrap().cpu_load = Some(42.5);
+            (portal, offset, fixed, insert)
+        };
+        Session::refresh(&session, view);
+        let mut ui = session.borrow_mut();
+        assert_eq!(
+            ui.harness
+                .get_widget_with_id(portal)
+                .downcast::<Portal<Flex>>()
+                .unwrap()
+                .inner()
+                .get_viewport_pos(),
+            offset
+        );
+        assert_eq!(ui.harness.focused_widget_id(), Some(insert));
+        assert_eq!(ui.button("Insert Before"), insert);
+        for (id, bounds) in fixed {
+            assert_eq!(rect(&ui, id), bounds);
+        }
+        ui.harness
+            .process_text_event(TextEvent::key_down(Key::Named(NamedKey::Enter)));
+        ui.harness
+            .process_text_event(TextEvent::key_up(Key::Named(NamedKey::Enter)));
+        assert_eq!(
+            ui.action(),
+            Some(UiAction::OpenPlugins { track_id, index: 0 })
         );
     }
 }
 
 #[test]
-fn loading_and_error_status_follow_confirmed_engine_operations() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest, track::Track};
-
-    fn create(state: &mut AppState) -> Track {
-        let effect = update(state, Action::Ui(UiAction::CreateTrack))
-            .effects
-            .remove(0);
-        let TinexRequest::NewTrack(track) = effect.request else {
-            panic!("expected create");
-        };
-        track
+fn keyed_tracks_keep_focus_ids_and_routes_when_preceding_tracks_are_deleted() {
+    let state = tracks(3);
+    let survivor = state.tracks[1].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let button;
+    {
+        let mut ui = session.borrow_mut();
+        button = ui.button("Track 2");
+        ui.harness.focus_on(Some(button));
+        ui.state.lock().unwrap().tracks.remove(0);
     }
-    let mut state = AppState::default();
-    assert_eq!(status(&state).0, "Ready");
-    let first = create(&mut state);
-    assert_eq!(status(&state).0, "Creating Track…");
-    let second = create(&mut state);
-    assert_eq!(status(&state).0, "Creating 2 Tracks…");
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(first.id())),
-    );
-    assert_eq!(status(&state).0, "Creating Track…");
-    update(&mut state, Action::Ui(UiAction::DeleteTrack(first.id())));
-    assert_eq!(status(&state).0, "Creating Track… · Deleting Track…");
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(second.id())),
-    );
-    assert_eq!(status(&state).0, "Deleting Track…");
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackDeleted(first)),
-    );
-    assert_eq!(status(&state).0, "Ready");
-
-    let failed = create(&mut state);
-    let _pending = create(&mut state);
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreationFailed(failed)),
-    );
-    let (text, tone) = status(&state);
-    assert!(text.contains("Could not create Track 3"));
-    assert!(text.contains("Creating Track…"));
-    assert!(matches!(tone, Tone::Error));
-    update(&mut state, Action::Disconnected);
-    assert!(status(&state).0.contains("Audio engine disconnected"));
+    Session::refresh(&session, view);
+    {
+        let mut ui = session.borrow_mut();
+        assert_eq!(ui.button("Track 2"), button);
+        assert_eq!(ui.harness.focused_widget_id(), Some(button));
+        ui.harness
+            .process_text_event(TextEvent::key_down(Key::Named(NamedKey::Enter)));
+        ui.harness
+            .process_text_event(TextEvent::key_up(Key::Named(NamedKey::Enter)));
+        assert_eq!(ui.action(), Some(UiAction::OpenTrack(survivor)));
+        // An out-of-order track confirmation inserts before existing survivors.
+        let mut extra = tracks(1).tracks.remove(0);
+        extra.name = "Earlier".into();
+        ui.state.lock().unwrap().tracks.insert(0, extra);
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert_eq!(ui.button("Track 2"), button);
+    ui.harness.mouse_click_on(button);
+    assert_eq!(ui.action(), Some(UiAction::OpenTrack(survivor)));
 }
 
 #[test]
-fn status_and_master_level_are_in_the_footer_not_the_header_or_track_list() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
+fn keyed_plugin_insertion_preserves_surviving_buttons_and_updates_indices() {
+    let mut state = tracks(1);
+    let id = state.tracks[0].id;
+    state.page = Page::Track(id);
+    state.tracks[0].plugins = vec![plugin("Delay")];
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let insert;
+    {
+        let mut ui = session.borrow_mut();
+        insert = ui.button("Insert Before");
+        ui.harness.focus_on(Some(insert));
+        ui.state.lock().unwrap().tracks[0]
+            .plugins
+            .insert(0, plugin("EPiano"));
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert_eq!(ui.harness.focused_widget_id(), Some(insert));
+    ui.harness.mouse_click_on(insert);
+    assert_eq!(
+        ui.action(),
+        Some(UiAction::OpenPlugins {
+            track_id: id,
+            index: 1
+        })
+    );
+}
+
+#[test]
+fn obsolete_keyed_messages_are_rejected_and_reorders_keep_actions_on_the_right_track() {
+    let state = tracks(3);
+    let first = state.tracks[0].id;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let stale_path;
+    {
+        let mut ui = session.borrow_mut();
+        let old_button = ui.button("Track 2");
+        stale_path = ui.path(old_button);
+        ui.state.lock().unwrap().tracks.remove(1);
+        ui.state.lock().unwrap().tracks.swap(0, 1);
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    let action = || {
+        Box::new(masonry::widgets::ButtonPress {
+            button: Some(masonry::core::PointerButton::Primary),
+        }) as masonry::core::ErasedAction
+    };
+    assert!(matches!(
+        ui.route_path(stale_path, action()),
+        xilem::core::MessageResult::Stale
+    ));
+    let button = ui.button("Track 1");
+    ui.harness.mouse_click_on(button);
+    assert_eq!(ui.action(), Some(UiAction::OpenTrack(first)));
+}
+
+#[test]
+fn footer_is_fixed_square_and_flush_on_every_page_size_and_display_scale() {
+    for scale in [1.0, 1.5, 2.0] {
+        for (width, height) in [(400.0, 280.0), (800.0, 450.0)] {
+            for count in [0, 12] {
+                for page in 0..3 {
+                    let mut state = tracks(count);
+                    if let Some(track) = state.tracks.first_mut() {
+                        track.plugins = (0..12).map(|_| plugin("EPiano")).collect();
+                        state.page = match page {
+                            0 => Page::Main,
+                            1 => Page::Track(track.id),
+                            _ => Page::Plugins(track.id, u16::MAX),
+                        };
+                    }
+                    let session =
+                        Session::new(state, view, Size::new(width * scale, height * scale), scale);
+                    let mut ui = session.borrow_mut();
+                    let footer = ui
+                        .widgets::<SizedBox>()
+                        .into_iter()
+                        .find(|id| {
+                            let bounds = rect(&ui, *id);
+                            (bounds.height() - 32.0).abs() < 0.01
+                                && bounds.x0 == 0.0
+                                && (bounds.x1 - width).abs() < 0.01
+                        })
+                        .expect("full-width 32px footer");
+                    let before = rect(&ui, footer);
+                    assert!(
+                        (before.y0 - (height - 32.0)).abs() < 0.01,
+                        "footer: {before:?}"
+                    );
+                    assert!((before.y1 - height).abs() < 0.01);
+                    assert_eq!(before.x0, 0.0);
+                    assert!((before.x1 - width).abs() < 0.01);
+                    let child = ui.harness.get_widget_with_id(footer).children()[0];
+                    assert_eq!(
+                        child.get_prop::<masonry::properties::CornerRadius>().radius,
+                        0.0
+                    );
+                    let meters = ui.widgets::<tinex_widgets::MeterWidget>();
+                    let progress = *meters.last().unwrap();
+                    let meter = meters[meters.len() - 2];
+                    assert!(before.contains_rect(rect(&ui, progress)));
+                    assert!(before.contains_rect(rect(&ui, meter)));
+                    let portal = ui.widgets::<Portal<Flex>>()[0];
+                    let center = rect(&ui, portal).center();
+                    ui.harness.mouse_move((center.x * scale, center.y * scale));
+                    ui.harness.mouse_wheel(Vec2::new(0.0, -120.0 * scale));
+                    assert_eq!(rect(&ui, footer), before);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scroll_and_focus_survive_meter_rebuilds_and_deleted_pages_fall_back() {
+    let session = Session::new(tracks(12), view, Size::new(800.0, 450.0), 1.0);
+    let portal;
+    let offset;
+    {
+        let mut ui = session.borrow_mut();
+        portal = ui.widgets::<Portal<Flex>>()[0];
+        let center = rect(&ui, portal).center();
+        ui.harness.mouse_move(center);
+        ui.harness.mouse_wheel(Vec2::new(0.0, -120.0));
+        offset = ui
+            .harness
+            .get_widget_with_id(portal)
+            .downcast::<Portal<Flex>>()
+            .unwrap()
+            .inner()
+            .get_viewport_pos();
+        assert!(offset.y > 0.0);
+        ui.state.lock().unwrap().master_output_level = 2.0;
+        ui.state.lock().unwrap().cpu_load = Some(42.5);
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert_eq!(
+        ui.harness
+            .get_widget_with_id(portal)
+            .downcast::<Portal<Flex>>()
+            .unwrap()
+            .inner()
+            .get_viewport_pos(),
+        offset
+    );
+    assert!(ui.labels().iter().any(|s| s == "42.5%"));
+    ui.state.lock().unwrap().page = Page::Track(TrackId::new());
+    drop(ui);
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert!(ui.labels().contains(&"Create Track".into()));
+}
+
+#[test]
+fn silence_and_selected_arm_are_presented_without_losing_pending_state() {
+    let mut state = tracks(1);
+    state.tracks[0].volume_db = -61.0;
+    state.tracks[0].output_level = f32::INFINITY;
+    state.tracks[0].armed = true;
+    state.arm_request_in_flight = true;
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    assert!(ui.labels().contains(&"−∞ dB".into()));
+    let arm = ui.button("Arm ●");
+    assert!(ui.harness.get_widget_with_id(arm).ctx().is_disabled());
+    assert_eq!(
+        *ui.harness
+            .get_widget_with_id(arm)
+            .get_prop::<masonry::properties::Background>(),
+        masonry::properties::Background::Color(theme::SELECTED)
+    );
+    ui.harness.mouse_click_on(arm);
+    assert!(ui.action().is_none());
+}
+
+#[test]
+fn main_page_explains_empty_pending_and_disconnected_states_without_phantom_tracks() {
+    let session = Session::new(AppState::default(), view, Size::new(400.0, 280.0), 1.0);
+    {
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        assert!(labels.contains(&"Tracks · 0".into()));
+        assert!(labels.contains(&"Your session starts here".into()));
+        assert!(
+            labels
+                .iter()
+                .any(|text| text.contains("Arm tracks to play them"))
+        );
+        update(
+            &mut ui.state.lock().unwrap(),
+            Action::Ui(UiAction::CreateTrack),
+        );
+    }
+    Session::refresh(&session, view);
+    {
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        assert!(labels.contains(&"Tracks · 0".into()));
+        assert!(labels.contains(&"Creating your first track…".into()));
+        assert!(labels.contains(&"Creating 1 track…".into()));
+        assert!(!labels.contains(&"Track 1".into()));
+        update(&mut ui.state.lock().unwrap(), Action::Disconnected);
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    assert!(
+        ui.labels()
+            .contains(&"Audio engine disconnected. Track settings remain available.".into())
+    );
+    let create = ui.button("Create Track");
+    assert!(ui.harness.get_widget_with_id(create).ctx().is_disabled());
+    ui.harness.mouse_click_on(create);
+    assert!(ui.action().is_none());
+}
+
+#[test]
+fn main_page_summarizes_confirmed_plugin_order_duplicates_and_pending_additions() {
+    let mut state = tracks(2);
+    state.tracks[0].plugins = vec![plugin("EPiano"), plugin("Delay"), plugin("EPiano")];
+    let pending = plugin("Compressor");
+    state.tracks[0].pending_plugins.insert(pending.id, pending);
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    let labels = ui.labels();
+    assert!(labels.contains(&"Tracks · 2".into()));
+    assert!(labels.contains(&"EPiano · Delay · EPiano · Adding plugin…".into()));
+    assert!(labels.contains(&"No plugins".into()));
+    assert!(!labels.iter().any(|text| text.contains("Compressor")));
+}
+
+#[test]
+fn main_track_controls_stay_aligned_and_inside_narrow_windows_with_long_names() {
+    for scale in [1.0, 2.0] {
+        for width in [400.0, 800.0] {
+            let mut state = tracks(2);
+            let long_name = "A very long track name that must not push controls off screen";
+            state.tracks[0].name = long_name.into();
+            state.tracks[0].plugins = (0..16).map(|_| plugin("Electric Piano")).collect();
+            state.tracks[1].armed = true;
+            state.tracks[1].deleting = true;
+            let session = Session::new(state, view, Size::new(width * scale, 450.0 * scale), scale);
+            let mut ui = session.borrow_mut();
+            let portal = ui.widgets::<Portal<Flex>>()[0];
+            let viewport = rect(&ui, portal);
+            let sliders = ui.widgets::<Slider>();
+            let first = rect(&ui, sliders[0]);
+            let second = rect(&ui, sliders[1]);
+            assert_eq!(first.x0, second.x0);
+            assert_eq!(first.x1, second.x1);
+            assert!(first.width() >= 80.0, "usable slider: {first:?}");
+            for text in [long_name, "Track 2", "Arm", "Delete", "Arm ●", "Deleting…"] {
+                let control = ui.button(text);
+                let bounds = rect(&ui, control);
+                assert!(
+                    viewport.contains_rect(bounds),
+                    "{text}: {bounds:?} in {viewport:?}"
+                );
+                assert!(bounds.width() >= 40.0);
+            }
+            for id in sliders {
+                assert!(viewport.contains_rect(rect(&ui, id)));
+            }
+        }
+    }
+}
+
+#[test]
+fn arm_confirmation_never_resizes_controls_or_moves_neighbors_on_either_page() {
+    fn controls<V: WidgetView<AppState, UiAction>>(ui: &mut Session<V>) -> Vec<(WidgetId, Rect)> {
+        let mut ids = ui.widgets::<masonry::widgets::Button>();
+        ids.extend(ui.widgets::<Slider>());
+        ids.extend(ui.widgets::<tinex_widgets::MeterWidget>());
+        ids.into_iter().map(|id| (id, rect(ui, id))).collect()
+    }
+
+    for scale in [1.0, 2.0] {
+        for width in [400.0, 800.0] {
+            for track_page in [false, true] {
+                let mut state = tracks(2);
+                let id = state.tracks[0].id;
+                if track_page {
+                    state.page = Page::Track(id);
+                    state.tracks[0].plugins = vec![plugin("EPiano")];
+                }
+                let session =
+                    Session::new(state, view, Size::new(width * scale, 450.0 * scale), scale);
+                let before = {
+                    let mut ui = session.borrow_mut();
+                    let arm = ui.button("Arm");
+                    assert_eq!(rect(&ui, arm).width(), TRACK_ARM_WIDTH);
+                    assert_eq!(rect(&ui, arm).height(), 32.0);
+                    controls(&mut ui)
+                };
+                for armed in [true, false] {
+                    update(
+                        &mut session.borrow().state.lock().unwrap(),
+                        Action::Ui(UiAction::ToggleTrackArm(id)),
+                    );
+                    Session::refresh(&session, view);
+                    assert_eq!(
+                        controls(&mut session.borrow_mut()),
+                        before,
+                        "pending arm request"
+                    );
+                    update(
+                        &mut session.borrow().state.lock().unwrap(),
+                        Action::Notification(TinexNotification::ArmTracks(if armed {
+                            [id].into()
+                        } else {
+                            Default::default()
+                        })),
+                    );
+                    Session::refresh(&session, view);
+                    let mut ui = session.borrow_mut();
+                    ui.button(if armed { "Arm ●" } else { "Arm" });
+                    assert_eq!(controls(&mut ui), before, "confirmed arm state");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn status_includes_pending_activity_and_error() {
     let mut state = AppState::default();
     update(&mut state, Action::Ui(UiAction::CreateTrack));
-    state.master_output_level = 2.0;
-    let Widget::Column(children) = view(&state) else {
-        panic!("expected column");
-    };
-    assert_eq!(children.len(), 3);
-    let Widget::Row {
-        children: header, ..
-    } = &children[0]
-    else {
-        panic!("expected header");
-    };
-    assert_eq!(header.len(), 1);
-    assert!(matches!(children[1], Widget::Scroll { .. }));
-    let Widget::StatusBar(footer) = &children[2] else {
-        panic!("expected footer");
-    };
-    assert!(matches!(&footer[0], Widget::Label { text, .. } if text == "Creating Track…"));
-    assert!(
-        matches!(&footer[1], Widget::Label { text, width: Some(56.0), .. } if text == "Master")
-    );
-    assert!(
-        matches!(&footer[2], Widget::CompactLevelMeter { meter, .. } if meter.amplitude == 2.0)
-    );
-}
-
-#[test]
-fn track_clicks_open_the_selected_page_and_back_returns_to_the_main_view() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    fn click(ui: &mut Ui<UiAction>, point: Point) -> Vec<UiAction> {
-        ui.input(Input::PointerMoved(point));
-        ui.input(Input::PointerPressed);
-        ui.input(Input::PointerReleased)
-    }
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track");
-    };
-    let size = Size::new(400.0, 280.0);
-    let mut ui = Ui::new(view(&state), size);
-    assert!(click(&mut ui, Point::new(36.0, 100.0)).is_empty()); // Still waiting for confirmation.
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(track.id())),
-    );
-    state.tracks[0].output_level = 2.0;
-    ui.set_view(view(&state), size);
-
-    for point in [Point::new(20.0, 100.0), Point::new(300.0, 194.0)] {
-        let actions = click(&mut ui, point); // Track row outside its nested controls.
-        assert!(matches!(actions.as_slice(), [UiAction::OpenTrack(id)] if *id == track.id()));
-        let result = update(&mut state, Action::Ui(actions[0]));
-        assert!(result.changed && result.effects.is_empty());
-        assert_eq!(state.page, Page::Track(track.id()));
-        ui.set_view(view(&state), size);
-
-        let Widget::Column(children) = view(&state) else {
-            panic!("expected page");
-        };
-        let Widget::Row {
-            children: header, ..
-        } = &children[0]
-        else {
-            panic!("expected header");
-        };
-        assert!(
-            matches!(&header[0], Widget::Button { label, enabled: true, action: UiAction::BackToMain, .. } if label == "Back to Tracks")
-        );
-        assert!(matches!(&header[1], Widget::Label { text, .. } if text == "Track 1"));
-        let Widget::Scroll { child, .. } = &children[1] else {
-            panic!("expected content");
-        };
-        let Widget::Column(content) = &**child else {
-            panic!("expected column");
-        };
-        let Widget::Row {
-            children: output, ..
-        } = &content[0]
-        else {
-            panic!("expected output row");
-        };
-        assert!(matches!(&output[1], Widget::MeterSlider { meter, .. } if meter.amplitude == 2.0));
-        let Widget::StatusBar(footer) = &children[2] else {
-            panic!("expected footer");
-        };
-        assert!(matches!(&footer[1], Widget::Label { text, .. } if text == "Master"));
-        let mut scene = Scene::new();
-        ui.render(
-            &mut scene,
-            &mut TextRenderer::new(),
-            &Theme::default().widgets,
-            2.0,
-        );
-        assert!(!scene.encoding().resources.glyph_runs.is_empty());
-        assert!(
-            scene
-                .encoding()
-                .resources
-                .glyphs
-                .iter()
-                .all(|glyph| glyph.id != 0)
-        );
-
-        let actions = click(&mut ui, Point::new(60.0, 42.0));
-        assert!(matches!(actions.as_slice(), [UiAction::BackToMain]));
-        let result = update(&mut state, Action::Ui(actions[0]));
-        assert!(result.changed && result.effects.is_empty());
-        assert_eq!(state.page, Page::Main);
-        ui.set_view(view(&state), size);
-        assert_eq!(state.tracks.len(), 1);
-    }
-
-    // The clickable row also participates in Tab/Enter navigation.
-    ui.input(Input::Cancel);
-    ui.input(Input::Tab { backwards: false }); // Create.
-    ui.input(Input::Tab { backwards: false }); // Track row.
-    ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: true,
-        repeat: false,
-    });
-    let actions = ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: false,
-        repeat: false,
-    });
-    assert!(matches!(actions.as_slice(), [UiAction::OpenTrack(id)] if *id == track.id()));
-    update(&mut state, Action::Ui(actions[0]));
-    update(&mut state, Action::Disconnected);
-    ui.set_view(view(&state), size);
-    let actions = click(&mut ui, Point::new(60.0, 42.0));
-    assert!(matches!(actions.as_slice(), [UiAction::BackToMain]));
-    update(&mut state, Action::Ui(actions[0]));
-    assert_eq!(state.page, Page::Main); // Back doesn't depend on engine connectivity.
-}
-
-#[test]
-fn add_plugin_picker_supports_pointer_keyboard_and_back_navigation() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track")
-    };
-    let id = track.id();
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(id)),
-    );
-    update(&mut state, Action::Ui(UiAction::OpenTrack(id)));
-    let size = Size::new(400.0, 280.0);
-    let mut ui = Ui::new(view(&state), size);
-    ui.input(Input::PointerMoved(Point::new(80.0, 186.0)));
-    ui.input(Input::PointerPressed);
-    let actions = ui.input(Input::PointerReleased);
-    assert!(
-        matches!(actions.as_slice(), [UiAction::OpenPlugins { track_id, index: u16::MAX }] if *track_id == id)
-    );
-    update(&mut state, Action::Ui(actions[0]));
-    assert_eq!(state.page, Page::Plugins(id, u16::MAX));
-    ui.set_view(view(&state), size);
-
-    let Widget::Column(children) = view(&state) else {
-        panic!("expected page")
-    };
-    assert!(matches!(children[2], Widget::StatusBar(_)));
-    let Widget::Scroll { child, .. } = &children[1] else {
-        panic!("expected scroll")
-    };
-    let Widget::Column(rows) = &**child else {
-        panic!("expected rows")
-    };
-    assert_eq!(rows.len(), tinex_plugins::FACTORY.len());
-    for (index, row) in rows.iter().enumerate() {
-        let Widget::Row { children, .. } = row else {
-            panic!("expected row")
-        };
-        assert!(
-            matches!(&children[0], Widget::Button { label, enabled: true, action: UiAction::AddPlugin { track_id, index: choice }, .. }
-            if label == tinex_plugins::FACTORY[index].name() && *track_id == id && *choice == index)
-        );
-    }
-
-    ui.input(Input::Cancel);
-    ui.input(Input::Tab { backwards: false }); // Back.
-    ui.input(Input::Tab { backwards: false }); // First plugin.
-    ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: true,
-        repeat: false,
-    });
-    let actions = ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: false,
-        repeat: false,
-    });
-    assert!(
-        matches!(actions.as_slice(), [UiAction::AddPlugin { track_id, index: 0 }] if *track_id == id)
-    );
-    let result = update(&mut state, Action::Ui(actions[0]));
-    assert!(
-        matches!(&result.effects[0].request, TinexRequest::AddPlugin { track_id, .. } if *track_id == id)
-    );
-    assert_eq!(state.page, Page::Track(id));
-    // Replayed selection must not add another plugin after leaving the picker.
-    assert!(
-        update(&mut state, Action::Ui(actions[0]))
-            .effects
-            .is_empty()
-    );
-
-    update(
-        &mut state,
-        Action::Ui(UiAction::OpenPlugins {
-            track_id: id,
-            index: u16::MAX,
-        }),
-    );
-    update(&mut state, Action::Disconnected);
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerMoved(Point::new(80.0, 100.0)));
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty()); // Selection disabled.
-    ui.input(Input::PointerMoved(Point::new(80.0, 42.0)));
-    ui.input(Input::PointerPressed);
-    let actions = ui.input(Input::PointerReleased);
-    assert!(matches!(actions.as_slice(), [UiAction::OpenTrack(track_id)] if *track_id == id));
-    update(&mut state, Action::Ui(actions[0]));
-    assert_eq!(state.page, Page::Track(id));
-}
-
-#[test]
-fn plugin_picker_rejects_stale_tracks_and_invalid_selections() {
-    use crate::gui::action::Action;
-    use crate::gui::update::update;
-    use tinex_core::{TinexNotification, TinexRequest};
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track")
-    };
-    let id = track.id();
-    assert!(
-        !update(
-            &mut state,
-            Action::Ui(UiAction::OpenPlugins {
-                track_id: id,
-                index: u16::MAX
-            })
+    assert_eq!(status(&state).0, "Creating Track…");
+    state.message = Some("Audio engine disconnected".into());
+    assert_eq!(
+        status(&state),
+        (
+            "Audio engine disconnected · Creating Track…".into(),
+            theme::ERROR
         )
-        .changed
     );
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(id)),
-    );
-    update(
-        &mut state,
-        Action::Ui(UiAction::OpenPlugins {
-            track_id: id,
-            index: u16::MAX,
-        }),
-    );
-    assert!(
-        update(
-            &mut state,
-            Action::Ui(UiAction::AddPlugin {
-                track_id: id,
-                index: usize::MAX
-            })
-        )
-        .effects
-        .is_empty()
-    );
-    update(&mut state, Action::Ui(UiAction::DeleteTrack(id)));
-    assert!(
-        update(
-            &mut state,
-            Action::Ui(UiAction::AddPlugin {
-                track_id: id,
-                index: 0
-            })
-        )
-        .effects
-        .is_empty()
-    );
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackDeleted(track)),
-    );
-    assert_eq!(state.page, Page::Main);
-    assert!(
-        !update(
-            &mut state,
-            Action::Ui(UiAction::OpenPlugins {
-                track_id: id,
-                index: u16::MAX
-            })
-        )
-        .changed
-    );
-}
-
-#[test]
-fn initial_view_draws_bundled_labels() {
-    let state = AppState::default();
-    let ui = tinex_widgets::Ui::new(view(&state), Size::new(800.0, 450.0));
-    let mut scene = Scene::new();
-    ui.render(
-        &mut scene,
-        &mut TextRenderer::new(),
-        &Theme::default().widgets,
-        2.0,
-    );
-    assert!(!scene.encoding().is_empty());
-    assert!(!scene.encoding().resources.glyph_runs.is_empty());
-    assert!(
-        scene
-            .encoding()
-            .resources
-            .glyphs
-            .iter()
-            .all(|glyph| glyph.id != 0)
-    );
-}
-
-#[test]
-fn track_volume_fader_supports_keyboard_and_pointer_at_multiple_sizes_and_scales() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{AdjustmentKey, Input, Ui};
-    use vello::kurbo::Point;
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track");
-    };
-    let id = track.id();
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(id)),
-    );
-    state.page = Page::Track(id);
-    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
-        state.tracks[0].volume_db = 0.0;
-        let mut ui = Ui::new(view(&state), size);
-        ui.input(Input::Tab { backwards: false }); // Back.
-        ui.input(Input::Tab { backwards: false }); // Volume.
-        let actions = ui.input(Input::Adjust(AdjustmentKey::Decrease));
-        assert!(
-            matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: -1.0 }] if *track_id == id)
-        );
-        update(&mut state, Action::Ui(actions[0]));
-        ui.set_view(view(&state), size);
-        let actions = ui.input(Input::Adjust(AdjustmentKey::Home));
-        update(&mut state, Action::Ui(actions[0]));
-        ui.set_view(view(&state), size);
-        let Widget::Column(page) = view(&state) else {
-            panic!("expected page");
-        };
-        let Widget::Scroll { child, .. } = &page[1] else {
-            panic!("expected scroll");
-        };
-        let Widget::Column(content) = &**child else {
-            panic!("expected content");
-        };
-        let Widget::Row { children, .. } = &content[0] else {
-            panic!("expected volume row");
-        };
-        assert!(
-            matches!(&children[1], Widget::MeterSlider { readout, meter, .. } if readout == "−∞ dB" && meter.amplitude == 0.0)
-        );
-        for scale in [1.0, 2.0] {
-            let mut scene = Scene::new();
-            ui.render(
-                &mut scene,
-                &mut TextRenderer::new(),
-                &Theme::default().widgets,
-                scale,
-            );
-            assert!(!scene.encoding().resources.glyph_runs.is_empty());
-            // Model the event loop's physical-to-logical pointer conversion.
-            let physical = Point::new((size.width - 220.0) * scale, 102.0 * scale);
-            ui.input(Input::PointerMoved(Point::new(
-                physical.x / scale,
-                physical.y / scale,
-            )));
-            let actions = ui.input(Input::PointerPressed);
-            assert!(
-                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, .. }] if *track_id == id)
-            );
-            ui.input(Input::PointerReleased);
-            // Restore silence for the next pointer interaction.
-            ui.set_view(view(&state), size);
-        }
-        state.tracks[0].deleting = true;
-        ui.set_view(view(&state), size);
-        assert!(ui.input(Input::Adjust(AdjustmentKey::End)).is_empty());
-        ui.input(Input::PointerPressed);
-        assert!(ui.input(Input::PointerReleased).is_empty());
-        state.tracks[0].deleting = false;
-    }
-    update(&mut state, Action::Disconnected);
-    let mut ui = Ui::new(view(&state), Size::new(400.0, 280.0));
-    ui.input(Input::Tab { backwards: false });
-    ui.input(Input::Tab { backwards: false }); // Only Back remains focusable.
-    assert!(ui.input(Input::Adjust(AdjustmentKey::End)).is_empty());
-}
-
-#[test]
-fn combined_meter_displays_post_gain_on_both_pages_and_preserves_stable_ids() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    let mut state = AppState::default();
-    let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-        .effects
-        .remove(0);
-    let TinexRequest::NewTrack(track) = effect.request else {
-        panic!("expected track");
-    };
-    let id = track.id();
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::TrackCreated(id)),
-    );
-    let slider_id = state.tracks[0].volume_slider;
-    for (db, level, expected) in [
-        (-61.0, f32::INFINITY, 0.0),
-        (-60.0, 1.0, 0.001),
-        (-6.0, 1.0, 10.0_f32.powf(-0.3)),
-        (0.0, 1.0, 1.0),
-        (6.0, 1.0, 10.0_f32.powf(0.3)),
-        (12.0, 1.0, 10.0_f32.powf(0.6)),
-        (0.0, f32::NAN, 0.0),
-        (0.0, -1.0, 0.0),
-        (0.0, f32::INFINITY, f32::INFINITY),
-    ] {
-        state.tracks[0].volume_db = db;
-        state.tracks[0].output_level = level;
-        for (page, width) in [(Page::Main, 144.0), (Page::Track(id), 240.0)] {
-            state.page = page;
-            let Widget::Column(page) = view(&state) else {
-                panic!("expected page");
-            };
-            let Widget::Scroll { child, .. } = &page[1] else {
-                panic!("expected scroll");
-            };
-            let Widget::Column(content) = &**child else {
-                panic!("expected column");
-            };
-            let children = match &content[0] {
-                Widget::Row { children, .. } => children,
-                Widget::ClickableRow { children, .. } => {
-                    let Widget::Column(rows) = &children[0] else {
-                        panic!("expected track card");
-                    };
-                    let Widget::Row { children, .. } = &rows[0] else {
-                        panic!("expected volume row");
-                    };
-                    children
-                }
-                _ => panic!("expected row"),
-            };
-            let Widget::MeterSlider {
-                slider,
-                meter,
-                readout,
-            } = &children[1]
-            else {
-                panic!("expected combined control");
-            };
-            assert_eq!(slider.id, slider_id);
-            assert_eq!(slider.value, db);
-            assert_eq!(slider.width, width);
-            assert_eq!(slider.max, 12.0);
-            assert_eq!(meter.amplitude, expected);
-            assert_eq!(
-                readout,
-                &if db == -61.0 {
-                    "−∞ dB".into()
-                } else {
-                    format!("{db:+.0} dB")
-                }
-            );
-        }
-    }
-}
-
-#[test]
-fn main_page_volume_controls_target_each_track_and_never_navigate() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{AdjustmentKey, Input, Ui};
-    use vello::kurbo::Point;
-    let mut state = AppState::default();
-    for _ in 0..2 {
-        let effect = update(&mut state, Action::Ui(UiAction::CreateTrack))
-            .effects
-            .remove(0);
-        let TinexRequest::NewTrack(track) = effect.request else {
-            panic!("expected track");
-        };
-        update(
-            &mut state,
-            Action::Notification(TinexNotification::TrackCreated(track.id())),
-        );
-    }
-    let first = state.tracks[0].id;
-    let second = state.tracks[1].id;
-    for size in [Size::new(400.0, 400.0), Size::new(800.0, 450.0)] {
-        for scale in [1.0, 2.0] {
-            state.tracks[0].volume_db = 0.0;
-            state.tracks[1].volume_db = 0.0;
-            let mut ui = Ui::new(view(&state), size);
-            for _ in 0..3 {
-                ui.input(Input::Tab { backwards: false });
-            } // Create, row, volume.
-            let actions = ui.input(Input::Adjust(AdjustmentKey::Increase));
-            assert!(
-                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: 1.0 }] if *track_id == first)
-            );
-            update(&mut state, Action::Ui(actions[0]));
-            assert_eq!(state.page, Page::Main);
-            assert_eq!(state.tracks[1].volume_db, 0.0);
-            ui.set_view(view(&state), size);
-            let physical = Point::new((size.width - 176.0) * scale, 270.0 * scale);
-            ui.input(Input::PointerMoved(Point::new(
-                physical.x / scale,
-                physical.y / scale,
-            )));
-            let actions = ui.input(Input::PointerPressed);
-            assert!(
-                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, .. }] if *track_id == second)
-            );
-            let result = update(&mut state, Action::Ui(actions[0]));
-            assert!(
-                matches!(&result.effects[0].request, TinexRequest::SetTrackVolume(id, _) if *id == second)
-            );
-            assert_eq!(state.page, Page::Main);
-            update(
-                &mut state,
-                Action::Notification(TinexNotification::OutputLevel {
-                    output_level: 0.5,
-                    tracks: [(first, 0.25), (second, 0.5)].into(),
-                }),
-            );
-            ui.set_view(view(&state), size);
-            // Capture stays on the second track even when dragging over the first.
-            let actions = ui.input(Input::PointerMoved(Point::new(size.width, 102.0)));
-            assert!(
-                matches!(actions.as_slice(), [UiAction::SetTrackVolume { track_id, db: 12.0 }] if *track_id == second)
-            );
-            update(&mut state, Action::Ui(actions[0]));
-            assert!(ui.input(Input::PointerReleased).is_empty());
-            assert_eq!(state.tracks[0].volume_db, 1.0);
-            assert_eq!(state.tracks[1].volume_db, 12.0);
-            assert_eq!(state.page, Page::Main);
-            state.tracks[1].deleting = true;
-            ui.set_view(view(&state), size);
-            ui.input(Input::PointerMoved(Point::new(size.width - 176.0, 270.0)));
-            assert!(ui.input(Input::PointerPressed).is_empty());
-            assert!(ui.input(Input::PointerReleased).is_empty());
-            assert_eq!(state.page, Page::Main);
-            state.tracks[1].deleting = false;
-        }
-    }
-    update(&mut state, Action::Disconnected);
-    let mut ui = Ui::new(view(&state), Size::new(400.0, 280.0));
-    ui.input(Input::PointerMoved(Point::new(270.0, 110.0)));
-    assert!(ui.input(Input::PointerPressed).is_empty());
-    assert!(ui.input(Input::PointerReleased).is_empty());
-    assert_eq!(state.page, Page::Main);
-}
-
-#[test]
-fn plugin_insertion_controls_select_positions_with_pointer_and_keyboard() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    let mut state = confirmed_tracks(2);
-    let track_id = state.tracks[0].id;
-    for index in 0..2 {
-        update(
-            &mut state,
-            Action::Ui(UiAction::OpenPlugins {
-                track_id,
-                index: u16::MAX,
-            }),
-        );
-        let effect = update(
-            &mut state,
-            Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
-        )
-        .effects
-        .remove(0);
-        let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
-            panic!("expected plugin")
-        };
-        update(
-            &mut state,
-            Action::Notification(TinexNotification::PluginAdded {
-                track_id,
-                plugin_id: plugin.id(),
-                index,
-            }),
-        );
-    }
-    let before = state.tracks[0].plugins.clone();
-    for size in [Size::new(400.0, 480.0), Size::new(800.0, 450.0)] {
-        for scale in [1.0, 2.0] {
-            for (position, tabs, logical) in [
-                (0, 6, Point::new(size.width - 92.0, 282.0)),
-                (1, 8, Point::new(size.width - 92.0, 342.0)),
-                (u16::MAX, 3, Point::new(80.0, 186.0)),
-            ] {
-                for keyboard in [false, true] {
-                    state.page = Page::Track(track_id);
-                    state.tracks[0].plugins = before.clone();
-                    let mut ui = Ui::new(view(&state), size);
-                    let actions = if keyboard {
-                        for _ in 0..tabs {
-                            ui.input(Input::Tab { backwards: false });
-                        }
-                        ui.input(Input::Key {
-                            key: ActivationKey::Space,
-                            pressed: true,
-                            repeat: false,
-                        });
-                        ui.input(Input::Key {
-                            key: ActivationKey::Space,
-                            pressed: false,
-                            repeat: false,
-                        })
-                    } else {
-                        let physical = Point::new(logical.x * scale, logical.y * scale);
-                        ui.input(Input::PointerMoved(Point::new(
-                            physical.x / scale,
-                            physical.y / scale,
-                        )));
-                        ui.input(Input::PointerPressed);
-                        ui.input(Input::PointerReleased)
-                    };
-                    assert!(
-                        matches!(actions.as_slice(), [UiAction::OpenPlugins { track_id: id, index }]
-                        if *id == track_id && *index == position)
-                    );
-                    update(&mut state, Action::Ui(actions[0]));
-                    assert_eq!(state.page, Page::Plugins(track_id, position));
-                    let mut picker = Ui::new(view(&state), size);
-                    picker.input(Input::Tab { backwards: false });
-                    picker.input(Input::Tab { backwards: false });
-                    picker.input(Input::Key {
-                        key: ActivationKey::Enter,
-                        pressed: true,
-                        repeat: false,
-                    });
-                    let selection = picker.input(Input::Key {
-                        key: ActivationKey::Enter,
-                        pressed: false,
-                        repeat: false,
-                    });
-                    let effect = update(&mut state, Action::Ui(selection[0]))
-                        .effects
-                        .remove(0);
-                    let TinexRequest::AddPlugin {
-                        track_id: id,
-                        plugin,
-                        index,
-                    } = effect.request
-                    else {
-                        panic!("expected plugin addition")
-                    };
-                    assert_eq!((id, index), (track_id, position));
-                    assert_eq!(state.page, Page::Track(track_id));
-                    assert_eq!(state.tracks[0].plugins, before);
-                    assert_eq!(state.tracks[0].pending_plugins.len(), 1);
-                    let actual = position.min(before.len() as u16);
-                    update(
-                        &mut state,
-                        Action::Notification(TinexNotification::PluginAdded {
-                            track_id,
-                            plugin_id: plugin.id(),
-                            index: actual,
-                        }),
-                    );
-                    assert_eq!(state.tracks[0].plugins[usize::from(actual)].id, plugin.id());
-                    assert!(state.tracks[0].pending_plugins.is_empty());
-                    assert!(state.tracks[1].plugins.is_empty());
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn insertion_buttons_keep_identity_and_disable_for_unavailable_tracks() {
-    use crate::gui::state::UiPluginInstance;
-    use tinex_core::plugin::PluginInstanceId;
-    use tinex_widgets::{ActivationKey, Input, Ui, WidgetId};
-    use vello::kurbo::Point;
-
-    let mut state = confirmed_tracks(1);
-    let track_id = state.tracks[0].id;
-    let plugin = UiPluginInstance {
-        id: PluginInstanceId::new(),
-        name: "EPiano",
-        delete_button: WidgetId::new(),
-        insert_before_button: WidgetId::new(),
-        deleting: false,
-    };
-    state.tracks[0].plugins.push(plugin.clone());
-    state.page = Page::Track(track_id);
-    let size = Size::new(400.0, 480.0);
-    let mut ui = Ui::new(view(&state), size);
-    // Moving the same plugin in the chain changes its action's index while
-    // its widget identity and keyboard focus survive the view rebuild.
-    for _ in 0..6 {
-        ui.input(Input::Tab { backwards: false });
-    }
-    ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: true,
-        repeat: false,
-    });
-    assert!(
-        matches!(ui.input(Input::Key { key: ActivationKey::Enter, pressed: false, repeat: false }).as_slice(),
-        [UiAction::OpenPlugins { track_id: id, index: 0 }] if *id == track_id)
-    );
-    let mut earlier = plugin.clone();
-    earlier.id = PluginInstanceId::new();
-    earlier.delete_button = WidgetId::new();
-    earlier.insert_before_button = WidgetId::new();
-    state.tracks[0].plugins.insert(0, earlier);
-    ui.set_view(view(&state), size);
-    ui.input(Input::Key {
-        key: ActivationKey::Enter,
-        pressed: true,
-        repeat: false,
-    });
-    assert!(
-        matches!(ui.input(Input::Key { key: ActivationKey::Enter, pressed: false, repeat: false }).as_slice(),
-        [UiAction::OpenPlugins { track_id: id, index: 1 }] if *id == track_id)
-    );
-    for (connected, deleting) in [(true, true), (false, false)] {
-        state.connected = connected;
-        state.tracks[0].deleting = deleting;
-        ui.set_view(view(&state), size);
-        for y in [186.0, 282.0, 342.0] {
-            let x = if y == 186.0 { 80.0 } else { 308.0 };
-            ui.input(Input::PointerMoved(Point::new(x, y)));
-            ui.input(Input::PointerPressed);
-            assert!(ui.input(Input::PointerReleased).is_empty());
-        }
-    }
-}
-
-#[test]
-fn scrolling_plugin_insertion_controls_preserves_footer_and_targets_visible_position() {
-    use crate::gui::state::UiPluginInstance;
-    use tinex_core::plugin::PluginInstanceId;
-    use tinex_widgets::{Input, Ui, WidgetId};
-    use vello::kurbo::Point;
-
-    for size in [Size::new(400.0, 280.0), Size::new(800.0, 450.0)] {
-        for scale in [1.0, 2.0] {
-            for count in [0, 20] {
-                let mut state = confirmed_tracks(1);
-                let track_id = state.tracks[0].id;
-                state.page = Page::Track(track_id);
-                state.tracks[0].plugins = (0..count)
-                    .map(|_| UiPluginInstance {
-                        id: PluginInstanceId::new(),
-                        name: "EPiano",
-                        delete_button: WidgetId::new(),
-                        insert_before_button: WidgetId::new(),
-                        deleting: false,
-                    })
-                    .collect();
-                let mut ui = Ui::new(view(&state), size);
-                let mut text = TextRenderer::new();
-                let theme = Theme::default();
-                let mut scene = Scene::new();
-                ui.render(&mut scene, &mut text, &theme.widgets, scale);
-                let footer: Vec<_> = scene
-                    .encoding()
-                    .resources
-                    .glyph_runs
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .map(|run| run.transform)
-                    .collect();
-                assert_eq!(footer.len(), 2);
-                assert!(
-                    footer.iter().all(|transform| transform.translation[1]
-                        == ((size.height - 26.0) * scale) as f32)
-                );
-                ui.input(Input::PointerMoved(Point::new(36.0, 100.0)));
-                ui.input(Input::Scroll(10_000.0));
-                ui.set_view(view(&state), size);
-                scene.reset();
-                ui.render(&mut scene, &mut text, &theme.widgets, scale);
-                let scrolled_footer: Vec<_> = scene
-                    .encoding()
-                    .resources
-                    .glyph_runs
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .map(|run| run.transform)
-                    .collect();
-                assert_eq!(scrolled_footer, footer);
-                ui.input(Input::PointerMoved(Point::new(
-                    size.width - 92.0,
-                    size.height - 16.0,
-                )));
-                ui.input(Input::PointerPressed);
-                assert!(ui.input(Input::PointerReleased).is_empty());
-                if count > 0 {
-                    let physical =
-                        Point::new((size.width - 92.0) * scale, (size.height - 66.0) * scale);
-                    ui.input(Input::PointerMoved(Point::new(
-                        physical.x / scale,
-                        physical.y / scale,
-                    )));
-                    ui.input(Input::PointerPressed);
-                    assert!(matches!(ui.input(Input::PointerReleased).as_slice(),
-                        [UiAction::OpenPlugins { track_id: id, index: 19 }] if *id == track_id));
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn plugin_delete_buttons_support_pointer_keyboard_and_pending_states() {
-    use crate::gui::{action::Action, update::update};
-    use tinex_core::{TinexNotification, TinexRequest};
-    use tinex_widgets::{ActivationKey, Input, Ui};
-    use vello::kurbo::Point;
-
-    let mut state = confirmed_tracks(1);
-    let track_id = state.tracks[0].id;
-    update(
-        &mut state,
-        Action::Ui(UiAction::OpenPlugins {
-            track_id,
-            index: u16::MAX,
-        }),
-    );
-    let effect = update(
-        &mut state,
-        Action::Ui(UiAction::AddPlugin { track_id, index: 0 }),
-    )
-    .effects
-    .remove(0);
-    let TinexRequest::AddPlugin { plugin, .. } = effect.request else {
-        panic!("expected plugin")
-    };
-    let plugin_id = plugin.id();
-    update(
-        &mut state,
-        Action::Notification(TinexNotification::PluginAdded {
-            track_id,
-            plugin_id,
-            index: 0,
-        }),
-    );
-    let size = Size::new(400.0, 480.0);
-    let button_id = state.tracks[0].plugins[0].delete_button;
-    let assert_button = |state: &AppState, expected_label: &str, expected_enabled: bool| {
-        let Widget::Column(page) = view(state) else {
-            panic!("expected page")
-        };
-        let Widget::Scroll { child, .. } = &page[1] else {
-            panic!("expected scroll")
-        };
-        let Widget::Column(rows) = &**child else {
-            panic!("expected content")
-        };
-        let Widget::Row { children, .. } = &rows[3] else {
-            panic!("expected plugin row")
-        };
-        assert!(matches!(&children[1], Widget::Button {
-            id, label, enabled, action: UiAction::DeletePlugin { track_id: track, plugin_id: instance }, ..
-        } if *id == button_id && label == expected_label && *enabled == expected_enabled
-            && *track == track_id && *instance == plugin_id));
-    };
-    assert_button(&state, "Delete", true);
-    for key in [ActivationKey::Enter, ActivationKey::Space] {
-        let mut ui = Ui::new(view(&state), size);
-        for _ in 0..5 {
-            // Back, volume, Add Plugin, Arm, Delete.
-            ui.input(Input::Tab { backwards: false });
-        }
-        ui.input(Input::Key {
-            key,
-            pressed: true,
-            repeat: false,
-        });
-        let actions = ui.input(Input::Key {
-            key,
-            pressed: false,
-            repeat: false,
-        });
-        assert!(
-            matches!(actions.as_slice(), [UiAction::DeletePlugin { track_id: track, plugin_id: instance }]
-            if *track == track_id && *instance == plugin_id)
-        );
-    }
-    let mut ui = Ui::new(view(&state), size);
-    ui.input(Input::PointerMoved(Point::new(176.0, 282.0)));
-    ui.input(Input::PointerPressed);
-    let actions = ui.input(Input::PointerReleased);
-    assert!(
-        matches!(actions.as_slice(), [UiAction::DeletePlugin { track_id: track, plugin_id: instance }]
-        if *track == track_id && *instance == plugin_id)
-    );
-    update(&mut state, Action::Ui(actions[0]));
-    assert_button(&state, "Deleting…", false);
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty());
-    state.tracks[0].plugins[0].deleting = false;
-    update(&mut state, Action::Ui(UiAction::DeleteTrack(track_id)));
-    assert_button(&state, "Delete", false);
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty());
-    update(&mut state, Action::Disconnected);
-    assert_button(&state, "Delete", false);
-    ui.set_view(view(&state), size);
-    ui.input(Input::PointerPressed);
-    assert!(ui.input(Input::PointerReleased).is_empty());
 }
