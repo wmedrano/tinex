@@ -51,6 +51,10 @@ pub(super) struct AppState {
     pub message: Option<String>,
     /// Linear, exponentially weighted peak of the engine's combined output.
     pub master_output_level: f32,
+    /// Requested tempo; engine reports overwrite it once they reflect the request.
+    pub bpm: f32,
+    /// A status poll sent before the last tempo change reports the old tempo.
+    pub bpm_stale: bool,
     /// JACK CPU utilization percentage, rounded to one decimal for display.
     pub cpu_load: Option<f32>,
     pub level_request_in_flight: bool,
@@ -71,6 +75,8 @@ impl Default for AppState {
             connected: true,
             message: None,
             master_output_level: 0.0,
+            bpm: 120.0,
+            bpm_stale: false,
             cpu_load: None,
             level_request_in_flight: false,
             arm_request_in_flight: false,

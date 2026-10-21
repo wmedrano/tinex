@@ -809,6 +809,8 @@ fn footer_is_fixed_square_and_flush_on_every_page_size_and_display_scale() {
                     let meter = meters[meters.len() - 2];
                     assert!(before.contains_rect(rect(&ui, progress)));
                     assert!(before.contains_rect(rect(&ui, meter)));
+                    let tempo = *ui.widgets::<Slider>().last().unwrap();
+                    assert!(before.contains_rect(rect(&ui, tempo)));
                     let portal = ui.widgets::<Portal<Flex>>()[0];
                     let center = rect(&ui, portal).center();
                     ui.harness.mouse_move((center.x * scale, center.y * scale));
@@ -967,8 +969,9 @@ fn main_track_controls_stay_aligned_and_inside_narrow_windows_with_long_names() 
                 );
                 assert!(bounds.width() >= 40.0);
             }
-            for id in sliders {
-                assert!(viewport.contains_rect(rect(&ui, id)));
+            // The footer's tempo slider comes last and sits outside the page.
+            for id in &sliders[..sliders.len() - 1] {
+                assert!(viewport.contains_rect(rect(&ui, *id)));
             }
         }
     }
@@ -1043,4 +1046,48 @@ fn status_includes_pending_activity_and_error() {
             theme::ERROR
         )
     );
+}
+
+#[test]
+fn footer_bpm_slider_is_labelled_and_jumps_or_steps_the_tempo() {
+    let state = AppState {
+        bpm: 120.0,
+        ..Default::default()
+    };
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    {
+        let mut ui = session.borrow_mut();
+        let labels = ui.labels();
+        let caption = labels.iter().position(|label| label == "BPM").unwrap();
+        assert_eq!(labels[caption + 1], "120");
+        // The main page has no tracks, so the only slider is the footer's.
+        let slider = ui.widgets::<Slider>()[0];
+        ui.harness.focus_on(Some(slider));
+        for (key, bpm) in [
+            (NamedKey::ArrowLeft, 119.0),
+            (NamedKey::ArrowRight, 120.0),
+            (NamedKey::Home, MIN_BPM),
+            (NamedKey::End, MAX_BPM),
+        ] {
+            ui.harness
+                .process_text_event(TextEvent::key_down(Key::Named(key)));
+            assert_eq!(ui.action(), Some(UiAction::SetBpm(bpm)));
+        }
+        // A single click lands far from the current tempo.
+        let bounds = rect(&ui, slider);
+        ui.harness
+            .mouse_move((bounds.x0 + bounds.width() * 0.1, bounds.center().y));
+        ui.harness
+            .mouse_button_press(masonry::core::PointerButton::Primary);
+        ui.harness
+            .mouse_button_release(masonry::core::PointerButton::Primary);
+        assert!(matches!(ui.action(), Some(UiAction::SetBpm(bpm)) if bpm < 60.0));
+        assert!(ui.action().is_none());
+        ui.state.lock().unwrap().connected = false;
+    }
+    Session::refresh(&session, view);
+    let mut ui = session.borrow_mut();
+    let slider = ui.widgets::<Slider>()[0];
+    ui.harness.mouse_click_on(slider);
+    assert!(ui.action().is_none());
 }

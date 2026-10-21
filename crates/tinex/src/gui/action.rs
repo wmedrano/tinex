@@ -27,6 +27,7 @@ pub(super) enum UiAction {
     BackToMain,
     DeleteTrack(TrackId),
     ToggleTrackArm(TrackId),
+    SetBpm(f32),
 }
 
 pub(super) enum Action {
@@ -47,6 +48,9 @@ pub(super) enum Operation {
     Create(TrackId),
     Delete(TrackId),
     ArmTracks,
+    SetBpm {
+        previous_bpm: f32,
+    },
     AddPlugin,
     DeletePlugin {
         track_id: TrackId,

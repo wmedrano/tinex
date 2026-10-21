@@ -7,6 +7,9 @@ use crate::gui::state::UiPluginInstance;
 use super::action::{Action, Effect, Operation, UiAction};
 use super::state::{AppState, Page, PendingTrack, UiTrack};
 
+pub(super) const MIN_BPM: f32 = 20.0;
+pub(super) const MAX_BPM: f32 = 300.0;
+
 #[derive(Default)]
 pub(super) struct Update {
     pub changed: bool,
@@ -76,6 +79,21 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     state.message = None;
                     result.changed = true;
                 }
+            }
+        }
+        Action::Ui(UiAction::SetBpm(bpm)) if state.connected && bpm.is_finite() => {
+            let bpm = bpm.clamp(MIN_BPM, MAX_BPM).round();
+            if state.bpm != bpm {
+                let previous_bpm = state.bpm;
+                state.bpm = bpm;
+                // Requests are handled in order, so only an in-flight poll is stale.
+                state.bpm_stale |= state.level_request_in_flight;
+                result.effects.push(Effect {
+                    request: TinexRequest::SetBpm(bpm),
+                    operation: Operation::SetBpm { previous_bpm },
+                });
+                state.message = None;
+                result.changed = true;
             }
         }
         Action::CpuLoad(load) => {
@@ -220,9 +238,13 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
         Action::Notification(TinexNotification::Status {
             output_level,
             mut tracks,
-            ..
+            transport,
         }) if state.connected => {
             state.level_request_in_flight = false;
+            if !std::mem::take(&mut state.bpm_stale) && transport.bpm.is_finite() {
+                result.changed |= state.bpm != transport.bpm;
+                state.bpm = transport.bpm;
+            }
             let level = sanitize_level(output_level);
             result.changed |= state.master_output_level != level;
             state.master_output_level = level;
@@ -305,6 +327,9 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 Operation::Create(id) => {
                     state.pending.remove(&id);
                 }
+                Operation::SetBpm { previous_bpm } => {
+                    state.bpm = previous_bpm;
+                }
                 Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
                 Operation::DeletePlugin {
                     track_id,
@@ -347,6 +372,7 @@ fn disconnect(state: &mut AppState) {
     state.pending.clear();
     state.level_request_in_flight = false;
     state.arm_request_in_flight = false;
+    state.bpm_stale = false;
     state.level_request_buffer.clear();
     state.master_output_level = 0.0;
     state.cpu_load = None;

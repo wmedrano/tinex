@@ -803,3 +803,65 @@ fn failed_plugin_deletion_and_disconnection_preserve_confirmed_plugins() {
         assert!(update(&mut state, Action::Ui(action)).effects.is_empty());
     }
 }
+
+#[test]
+fn bpm_changes_are_clamped_rounded_and_requested_once() {
+    let mut state = AppState::default();
+    assert_eq!(state.bpm, 120.0);
+    for (bpm, expected) in [(121.4, 121.0), (5.0, MIN_BPM), (1000.0, MAX_BPM)] {
+        let result = update(&mut state, Action::Ui(UiAction::SetBpm(bpm)));
+        assert!(result.changed);
+        assert!(matches!(result.effects.as_slice(), [Effect {
+            request: TinexRequest::SetBpm(value), ..
+        }] if *value == expected));
+        assert_eq!(state.bpm, expected);
+        let repeated = update(&mut state, Action::Ui(UiAction::SetBpm(bpm)));
+        assert!(!repeated.changed && repeated.effects.is_empty());
+    }
+    for bpm in [f32::NAN, f32::INFINITY] {
+        let ignored = update(&mut state, Action::Ui(UiAction::SetBpm(bpm)));
+        assert!(!ignored.changed && ignored.effects.is_empty());
+    }
+    update(&mut state, Action::Disconnected);
+    let ignored = update(&mut state, Action::Ui(UiAction::SetBpm(90.0)));
+    assert!(!ignored.changed && ignored.effects.is_empty());
+    assert_eq!(state.bpm, MAX_BPM);
+}
+
+#[test]
+fn bpm_ignores_polls_sent_before_the_change_and_restores_failed_requests() {
+    let status = |bpm| {
+        Action::Notification(TinexNotification::Status {
+            output_level: 0.0,
+            tracks: Default::default(),
+            transport: tinex_core::Transport { bpm },
+        })
+    };
+    let mut state = AppState::default();
+    assert!(update(&mut state, status(90.0)).changed);
+    assert_eq!(state.bpm, 90.0);
+
+    // This poll was queued before SetBpm, so its reply still has the old tempo.
+    update(&mut state, Action::SampleLevels);
+    update(&mut state, Action::Ui(UiAction::SetBpm(100.0)));
+    update(&mut state, status(90.0));
+    assert_eq!(state.bpm, 100.0);
+    update(&mut state, Action::SampleLevels);
+    update(&mut state, status(100.0));
+    assert_eq!(state.bpm, 100.0);
+
+    // Without an in-flight poll, the next reply is authoritative.
+    update(&mut state, Action::Ui(UiAction::SetBpm(110.0)));
+    update(&mut state, Action::SampleLevels);
+    update(&mut state, status(110.0));
+    assert_eq!(state.bpm, 110.0);
+
+    let previous = state.bpm;
+    let result = update(&mut state, Action::Ui(UiAction::SetBpm(130.0)));
+    let [Effect { operation, .. }] = result.effects.as_slice() else {
+        panic!("expected one effect");
+    };
+    update(&mut state, Action::RequestFailed(*operation));
+    assert_eq!(state.bpm, previous);
+    assert!(!state.connected);
+}

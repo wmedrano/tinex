@@ -3,8 +3,8 @@ use tinex_widgets::{FONT_STACK, level_meter, percentage_meter, sanitize_level};
 use xilem::masonry::properties::{LineBreaking, Padding, types::Length};
 use xilem::style::Style;
 use xilem::view::{
-    CrossAxisAlignment, FlexExt, button as xilem_button, flex_col, flex_row, label, sized_box,
-    slider, zstack,
+    CrossAxisAlignment, Flex, FlexExt, FlexSequence, button as xilem_button, flex_col, flex_row,
+    label, sized_box, slider, zstack,
 };
 use xilem::{AnyWidgetView, WidgetView};
 
@@ -12,6 +12,7 @@ use super::{
     action::UiAction,
     state::{AppState, Page, UiTrack},
     theme,
+    update::{MAX_BPM, MIN_BPM},
 };
 mod main;
 mod plugins;
@@ -43,37 +44,63 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
     // Flex children may shrink at the minimum window size; the footer itself
     // never enters the Portal, and its square background fills the whole width.
     let footer = sized_box(
+        // Captions stay close to their controls; groups get wider separation.
         flex_row((
             label(status)
                 .font(FONT_STACK)
                 .text_size(12.0)
                 .color(color)
                 .line_break_mode(LineBreaking::Clip)
-                .flex(1.0),
-            label("Master")
-                .font(FONT_STACK)
-                .text_size(12.0)
-                .color(theme::MUTED),
-            level_meter(state.master_output_level, 176.0, 24.0, theme::meter_style()).flex(1.0),
-            label("CPU")
-                .font(FONT_STACK)
-                .text_size(12.0)
-                .color(theme::MUTED),
-            zstack((
-                percentage_meter(
-                    f64::from(state.cpu_load.unwrap_or(0.0)),
-                    88.0,
-                    24.0,
-                    theme::meter_style(),
-                ),
-                label(format!("{:.1}%", state.cpu_load.unwrap_or(0.0)))
-                    .font(FONT_STACK)
-                    .text_size(12.0)
-                    .color(theme::TEXT),
+                .flex(0.5),
+            footer_group((
+                footer_caption("BPM"),
+                // Dragging covers large tempo jumps; arrow keys step by exactly 1 BPM.
+                sized_box(traced(
+                    slider(
+                        f64::from(MIN_BPM),
+                        f64::from(MAX_BPM),
+                        f64::from(state.bpm),
+                        |_: &mut AppState, bpm| UiAction::SetBpm(bpm as f32),
+                    )
+                    .step(1.0)
+                    .disabled(!state.connected),
+                ))
+                // Masonry sliders are never narrower than 100px, so a flex share
+                // would overflow the footer at the minimum window width.
+                .width(Length::px(100.0)),
+                // Fixed width keeps the meters from shifting as the digit count changes.
+                sized_box(
+                    label(format!("{:.0}", state.bpm))
+                        .font(FONT_STACK)
+                        .text_size(12.0)
+                        .color(theme::TEXT),
+                )
+                .width(Length::px(24.0)),
+            )),
+            footer_group((
+                footer_caption("Master"),
+                level_meter(state.master_output_level, 176.0, 24.0, theme::meter_style()).flex(1.0),
             ))
-            .flex(0.6),
+            .flex(1.0),
+            footer_group((
+                footer_caption("CPU"),
+                zstack((
+                    percentage_meter(
+                        f64::from(state.cpu_load.unwrap_or(0.0)),
+                        88.0,
+                        24.0,
+                        theme::meter_style(),
+                    ),
+                    label(format!("{:.1}%", state.cpu_load.unwrap_or(0.0)))
+                        .font(FONT_STACK)
+                        .text_size(12.0)
+                        .color(theme::TEXT),
+                ))
+                .flex(1.0),
+            ))
+            .flex(0.8),
         ))
-        .gap(Length::px(6.0))
+        .gap(Length::px(12.0))
         .padding(Padding::from_vh(0.0, 8.0))
         .background_color(theme::SURFACE)
         .corner_radius(0.0),
@@ -83,6 +110,19 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
         .cross_axis_alignment(CrossAxisAlignment::Fill)
         .gap(Length::ZERO)
         .background_color(theme::BACKGROUND)
+}
+
+fn footer_caption(text: &'static str) -> impl WidgetView<AppState, UiAction> + use<> {
+    label(text)
+        .font(FONT_STACK)
+        .text_size(12.0)
+        .color(theme::MUTED)
+}
+
+fn footer_group<Seq: FlexSequence<AppState, UiAction>>(
+    children: Seq,
+) -> Flex<Seq, AppState, UiAction> {
+    flex_row(children).gap(Length::px(6.0))
 }
 
 fn caption(text: impl Into<String>, color: xilem::Color) -> BoxView {
