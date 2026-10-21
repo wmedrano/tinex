@@ -340,9 +340,10 @@ fn drains_all_variants_and_disconnection_after_queued_confirmations() {
         .send(TinexNotification::TrackCreationFailed(failed))
         .unwrap();
     sender
-        .send(TinexNotification::OutputLevel {
+        .send(TinexNotification::Status {
             output_level: 0.5,
             tracks: HashMap::new(),
+            transport: tinex_core::Transport::default(),
         })
         .unwrap();
     sender

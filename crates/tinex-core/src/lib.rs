@@ -17,11 +17,23 @@ const TRACK_CAPACITY: usize = 64;
 const OUTPUT_LEVEL_TIME_CONSTANT: f64 = 0.1;
 
 pub struct Tinex {
+    transport: Transport,
     tracks: Vec<Track>,
     output_level: f64,
     requests: Receiver<TinexRequest>,
     notifications: Sender<TinexNotification>,
     thread_pool: rayon::ThreadPool,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Transport {
+    pub bpm: f32,
+}
+
+impl Default for Transport {
+    fn default() -> Transport {
+        Transport { bpm: 120.0 }
+    }
 }
 
 pub struct ProcessArgs<'a, 'out> {
@@ -43,6 +55,7 @@ impl Tinex {
             .thread_name(|index| format!("tinex-dsp-{index}"))
             .build()?;
         Ok(Tinex {
+            transport: Transport::default(),
             tracks: Vec::with_capacity(TRACK_CAPACITY),
             output_level: 0.0,
             requests,
@@ -61,15 +74,21 @@ impl Tinex {
     fn handle_requests(&mut self) {
         for request in self.requests.try_iter() {
             match request {
-                TinexRequest::OutputLevel(mut tracks) => {
+                TinexRequest::SetBpm(bpm) => {
+                    self.transport.bpm = bpm;
+                }
+                TinexRequest::PollStatus {
+                    mut requested_tracks,
+                } => {
                     for track in self.tracks.iter_mut() {
-                        if let Some(level) = tracks.get_mut(&track.id()) {
+                        if let Some(level) = requested_tracks.get_mut(&track.id()) {
                             *level = track.output_level();
                         }
                     }
-                    let _ = self.notifications.send(TinexNotification::OutputLevel {
+                    let _ = self.notifications.send(TinexNotification::Status {
                         output_level: self.output_level as f32,
-                        tracks,
+                        tracks: requested_tracks,
+                        transport: self.transport,
                     });
                 }
                 TinexRequest::SetTrackVolume(track_id, volume) => {
@@ -281,19 +300,23 @@ mod tests {
         assert!(process(&mut tinex, &received).is_empty());
 
         sender
-            .send(TinexRequest::OutputLevel(HashMap::new()))
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::new(),
+            })
             .unwrap();
         sender
-            .send(TinexRequest::OutputLevel(HashMap::new()))
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::new(),
+            })
             .unwrap();
         assert!(matches!(
             process(&mut tinex, &received).as_slice(),
             [
-                TinexNotification::OutputLevel {
+                TinexNotification::Status {
                     output_level: 0.0,
                     ..
                 },
-                TinexNotification::OutputLevel {
+                TinexNotification::Status {
                     output_level: 0.0,
                     ..
                 }
@@ -378,7 +401,9 @@ mod tests {
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications).unwrap();
         sender
-            .send(TinexRequest::OutputLevel(HashMap::new()))
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::new(),
+            })
             .unwrap();
         sender
             .send(TinexRequest::NewTrack(Track::with_plugin(Passthrough)))
@@ -400,7 +425,7 @@ mod tests {
         }
         assert!(matches!(
             received.try_recv().unwrap(),
-            TinexNotification::OutputLevel {
+            TinexNotification::Status {
                 output_level: 0.0,
                 ..
             }
@@ -415,7 +440,9 @@ mod tests {
             + 0.2 * (1.0 - (-1.0_f32 / 4800.0).exp());
         for _ in 0..2 {
             sender
-                .send(TinexRequest::OutputLevel(HashMap::new()))
+                .send(TinexRequest::PollStatus {
+                    requested_tracks: HashMap::new(),
+                })
                 .unwrap();
             tinex.process(ProcessArgs {
                 sample_rate: 48_000,
@@ -425,7 +452,7 @@ mod tests {
                 _arena: &arena,
             });
             assert!(
-                matches!(received.try_recv().unwrap(), TinexNotification::OutputLevel { output_level: level, .. } if (level - expected).abs() < 1e-6)
+                matches!(received.try_recv().unwrap(), TinexNotification::Status { output_level: level, .. } if (level - expected).abs() < 1e-6)
             );
             assert!(received.try_recv().is_err());
         }
@@ -492,7 +519,11 @@ mod tests {
             .map(|(id, level)| (*id, level as *const f32))
             .collect();
         for _ in 0..2 {
-            sender.send(TinexRequest::OutputLevel(tracks)).unwrap();
+            sender
+                .send(TinexRequest::PollStatus {
+                    requested_tracks: tracks,
+                })
+                .unwrap();
             tinex.process(ProcessArgs {
                 sample_rate: 48_000,
                 input: [&[], &[]],
@@ -500,9 +531,10 @@ mod tests {
                 output: [&mut [], &mut []],
                 _arena: &arena,
             });
-            let TinexNotification::OutputLevel {
+            let TinexNotification::Status {
                 output_level,
                 tracks: returned,
+                ..
             } = received.try_recv().unwrap()
             else {
                 panic!("expected output levels");
@@ -525,7 +557,11 @@ mod tests {
         // Deletion is handled before the following level request.
         let deleted_level = tracks[&ids[0]];
         sender.send(TinexRequest::DeleteTrack(ids[0])).unwrap();
-        sender.send(TinexRequest::OutputLevel(tracks)).unwrap();
+        sender
+            .send(TinexRequest::PollStatus {
+                requested_tracks: tracks,
+            })
+            .unwrap();
         tinex.process(ProcessArgs {
             sample_rate: 48_000,
             input: [&[], &[]],
@@ -537,7 +573,7 @@ mod tests {
             received.try_recv().unwrap(),
             TinexNotification::TrackDeleted(_)
         ));
-        let TinexNotification::OutputLevel { tracks, .. } = received.try_recv().unwrap() else {
+        let TinexNotification::Status { tracks, .. } = received.try_recv().unwrap() else {
             panic!("expected output levels");
         };
         // A deleted track keeps its last reported level; only live tracks are updated.
@@ -552,18 +588,22 @@ mod tests {
         let track = Track::with_plugin(plugin::Silence);
         let id = track.id();
         sender
-            .send(TinexRequest::OutputLevel(HashMap::from([(id, -1.0)])))
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::from([(id, -1.0)]),
+            })
             .unwrap();
         sender.send(TinexRequest::NewTrack(track)).unwrap();
         sender
-            .send(TinexRequest::OutputLevel(HashMap::from([(id, -1.0)])))
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::from([(id, -1.0)]),
+            })
             .unwrap();
         let notifications = process(&mut tinex, &received);
         // The first request precedes creation, so its placeholder survives untouched.
         assert!(matches!(notifications.as_slice(), [
-            TinexNotification::OutputLevel { tracks: before, .. },
+            TinexNotification::Status { tracks: before, .. },
             TinexNotification::TrackCreated(created),
-            TinexNotification::OutputLevel { tracks: after, .. },
+            TinexNotification::Status { tracks: after, .. },
         ] if before[&id] == -1.0 && *created == id && after[&id] == 0.0));
     }
 

@@ -196,7 +196,9 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             }
             state.level_request_in_flight = true;
             result.effects.push(Effect {
-                request: TinexRequest::OutputLevel(tracks),
+                request: TinexRequest::PollStatus {
+                    requested_tracks: tracks,
+                },
                 operation: Operation::SampleLevels,
             });
         }
@@ -215,9 +217,10 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 result.changed = true;
             }
         }
-        Action::Notification(TinexNotification::OutputLevel {
+        Action::Notification(TinexNotification::Status {
             output_level,
             mut tracks,
+            ..
         }) if state.connected => {
             state.level_request_in_flight = false;
             let level = sanitize_level(output_level);
@@ -330,7 +333,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             disconnect(state);
             result.changed = true;
         }
-        Action::Notification(TinexNotification::OutputLevel { .. })
+        Action::Notification(TinexNotification::Status { .. })
         | Action::Notification(TinexNotification::ArmTracks(_))
         | Action::SampleLevels
         | Action::Ui(_)

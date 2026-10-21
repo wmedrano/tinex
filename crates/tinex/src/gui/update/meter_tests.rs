@@ -25,7 +25,10 @@ fn sample(state: &mut AppState) -> HashMap<TrackId, f32> {
     assert_eq!(result.effects.len(), 1);
     let effect = result.effects.into_iter().next().unwrap();
     assert!(matches!(effect.operation, Operation::SampleLevels));
-    let TinexRequest::OutputLevel(tracks) = effect.request else {
+    let TinexRequest::PollStatus {
+        requested_tracks: tracks,
+    } = effect.request
+    else {
         panic!("expected levels");
     };
     tracks
@@ -34,9 +37,10 @@ fn sample(state: &mut AppState) -> HashMap<TrackId, f32> {
 fn reply(state: &mut AppState, tracks: HashMap<TrackId, f32>) -> bool {
     let result = update(
         state,
-        Action::Notification(TinexNotification::OutputLevel {
+        Action::Notification(TinexNotification::Status {
             output_level: 0.0,
             tracks,
+            transport: tinex_core::Transport::default(),
         }),
     );
     assert!(result.effects.is_empty()); // Responses never trigger another sample.
@@ -88,9 +92,10 @@ fn master_updates_without_tracks_and_sanitizes_values_without_clamping_headroom(
         let changed = state.master_output_level != expected;
         let result = update(
             &mut state,
-            Action::Notification(TinexNotification::OutputLevel {
+            Action::Notification(TinexNotification::Status {
                 output_level: value,
                 tracks,
+                transport: tinex_core::Transport::default(),
             }),
         );
         assert_eq!(result.changed, changed);
@@ -100,9 +105,10 @@ fn master_updates_without_tracks_and_sanitizes_values_without_clamping_headroom(
         assert!(
             !update(
                 &mut state,
-                Action::Notification(TinexNotification::OutputLevel {
+                Action::Notification(TinexNotification::Status {
                     output_level: value,
                     tracks: HashMap::new(),
+                    transport: tinex_core::Transport::default(),
                 })
             )
             .changed
@@ -112,9 +118,10 @@ fn master_updates_without_tracks_and_sanitizes_values_without_clamping_headroom(
     assert!(
         !update(
             &mut state,
-            Action::Notification(TinexNotification::OutputLevel {
+            Action::Notification(TinexNotification::Status {
                 output_level: 2.0,
                 tracks: HashMap::new(),
+                transport: tinex_core::Transport::default(),
             })
         )
         .changed
@@ -208,9 +215,10 @@ fn disconnection_clears_levels_and_pending_transport() {
         reply(&mut state, HashMap::from([(track.id(), 2.0)]));
         update(
             &mut state,
-            Action::Notification(TinexNotification::OutputLevel {
+            Action::Notification(TinexNotification::Status {
                 output_level: 3.0,
                 tracks: HashMap::from([(track.id(), 2.0)]),
+                transport: tinex_core::Transport::default(),
             }),
         );
         let tracks = sample(&mut state);

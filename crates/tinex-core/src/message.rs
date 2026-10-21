@@ -1,15 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
+    Transport,
     plugin::{PluginInstance, PluginInstanceId},
     track::{Track, TrackId},
 };
 
 pub enum TinexRequest {
-    /// Updates the supplied track entries with exponentially weighted block peak levels.
-    /// Entries for unknown tracks are left untouched; the response returns the same map
-    /// allocation.
-    OutputLevel(HashMap<TrackId, f32>),
+    PollStatus {
+        // The tracks to request volume for. Only tracks in this set will receive levels. Any tracks
+        // that are missing will not have any update.
+        requested_tracks: HashMap<TrackId, f32>,
+    },
+    SetBpm(f32),
     SetTrackVolume(TrackId, f32),
     NewTrack(Track),
     DeleteTrack(TrackId),
@@ -25,9 +28,13 @@ pub enum TinexRequest {
 
 #[derive(Debug)]
 pub enum TinexNotification {
-    OutputLevel {
+    Status {
+        /// The output level of the final mix.
         output_level: f32,
+        /// A map from `TrackId` to its level.
         tracks: HashMap<TrackId, f32>,
+        /// The status of the transport.
+        transport: Transport,
     },
     TrackCreated(TrackId),
     TrackCreationFailed(Track),

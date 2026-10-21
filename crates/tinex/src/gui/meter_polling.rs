@@ -96,14 +96,18 @@ mod tests {
                 .is_none()
         );
         assert!(polling.deadline(now, &state, true).is_none());
-        let TinexRequest::OutputLevel(tracks) = effect.request else {
+        let TinexRequest::PollStatus {
+            requested_tracks: tracks,
+        } = effect.request
+        else {
             panic!("expected levels");
         };
         update(
             &mut state,
-            Action::Notification(TinexNotification::OutputLevel {
+            Action::Notification(TinexNotification::Status {
                 output_level: 0.0,
                 tracks,
+                transport: tinex_core::Transport::default(),
             }),
         );
         assert!(

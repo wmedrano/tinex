@@ -348,9 +348,10 @@ fn level_responses_preserve_navigation_and_track_identity() {
     assert_eq!(update(&mut state, Action::SampleLevels).effects.len(), 1);
     update(
         &mut state,
-        Action::Notification(TinexNotification::OutputLevel {
+        Action::Notification(TinexNotification::Status {
             output_level: 2.0,
             tracks: std::collections::HashMap::from([(track.id(), 2.0)]),
+            transport: tinex_core::Transport::default(),
         }),
     );
     assert_eq!(state.page, Page::Track(track.id()));
