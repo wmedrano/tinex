@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Transport,
+    Beat, Transport,
     plugin::{PluginInstance, PluginInstanceId},
     track::{Track, TrackId},
 };
@@ -12,7 +12,7 @@ pub enum TinexRequest {
         // that are missing will not have any update.
         requested_tracks: HashMap<TrackId, f32>,
     },
-    SetBpm(f32),
+    SetTransport(TransportChange),
     SetTrackVolume(TrackId, f32),
     NewTrack(Track),
     DeleteTrack(TrackId),
@@ -24,6 +24,15 @@ pub enum TinexRequest {
         index: u16,
     },
     DeletePlugin(TrackId, PluginInstanceId),
+}
+
+/// Changes to apply to the transport. `None` leaves a field as it is.
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+pub struct TransportChange {
+    pub bpm: Option<f32>,
+    pub playing: Option<bool>,
+    /// Positions past the end of the arrangement wrap on the next block.
+    pub beat: Option<Beat>,
 }
 
 #[derive(Debug)]

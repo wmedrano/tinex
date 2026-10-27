@@ -823,6 +823,123 @@ fn footer_is_fixed_square_and_flush_on_every_page_size_and_display_scale() {
 }
 
 #[test]
+fn timeline_spans_the_window_above_the_footer_with_one_number_per_bar() {
+    for (width, height) in [(400.0, 280.0), (800.0, 450.0)] {
+        let state = AppState {
+            beat: 6.5,
+            measures: 8,
+            ..tracks(3)
+        };
+        let session = Session::new(state, view, Size::new(width, height), 1.0);
+        let mut ui = session.borrow_mut();
+        let timeline = ui.widgets::<tinex_widgets::TimelineWidget>()[0];
+        let bounds = rect(&ui, timeline);
+        // Play/pause and stop sit at the row's left end.
+        let start = 2.0 * TRANSPORT_BUTTON_WIDTH;
+        assert_eq!(
+            bounds,
+            Rect::new(start, height - 60.0, width, height - 32.0)
+        );
+        let labels = ui.labels();
+        let numbers: Vec<_> = (1..=8).map(|bar| bar.to_string()).collect();
+        assert!(labels.windows(8).any(|window| window == numbers.as_slice()));
+        let node = ui.harness.access_node(timeline).unwrap();
+        assert_eq!(node.value().as_deref(), Some("Bar 2 of 8, beat 3"));
+    }
+}
+
+/// The button around a painted transport symbol.
+fn transport_button<V: WidgetView<AppState, UiAction>>(
+    ui: &mut Session<V>,
+    glyph: TransportGlyph,
+) -> Option<WidgetId> {
+    ui.widgets::<masonry::widgets::Button>()
+        .into_iter()
+        .find(|id| {
+            ui.harness.get_widget_with_id(*id).children()[0]
+                .downcast::<tinex_widgets::TransportIconWidget>()
+                .is_some_and(|icon| icon.inner().glyph() == glyph)
+        })
+}
+
+#[test]
+fn transport_buttons_toggle_playing_and_stop_beside_the_timeline() {
+    for (playing, shown, hidden) in [
+        (false, TransportGlyph::Play, TransportGlyph::Pause),
+        (true, TransportGlyph::Pause, TransportGlyph::Play),
+    ] {
+        let state = AppState {
+            playing,
+            ..tracks(1)
+        };
+        let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+        let mut ui = session.borrow_mut();
+        assert!(transport_button(&mut ui, hidden).is_none());
+        let timeline = ui.widgets::<tinex_widgets::TimelineWidget>()[0];
+        let timeline = rect(&ui, timeline);
+        for (index, (glyph, action)) in [
+            (shown, UiAction::TogglePlaying),
+            (TransportGlyph::Stop, UiAction::Stop),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let button = transport_button(&mut ui, glyph).unwrap();
+            // Only the play/pause button lights up, and only while playing.
+            let background = if playing && action == UiAction::TogglePlaying {
+                theme::PLAYING
+            } else {
+                xilem::Color::from_rgb8(68, 71, 90)
+            };
+            assert_eq!(
+                *ui.harness
+                    .get_widget_with_id(button)
+                    .get_prop::<masonry::properties::Background>(),
+                masonry::properties::Background::Color(background)
+            );
+            let bounds = rect(&ui, button);
+            let left = index as f64 * TRANSPORT_BUTTON_WIDTH;
+            assert_eq!(
+                bounds,
+                Rect::new(
+                    left,
+                    timeline.y0,
+                    left + TRANSPORT_BUTTON_WIDTH,
+                    timeline.y1
+                )
+            );
+            ui.harness.mouse_move(bounds.center());
+            ui.harness
+                .mouse_button_press(masonry::core::PointerButton::Primary);
+            ui.harness
+                .mouse_button_release(masonry::core::PointerButton::Primary);
+            assert_eq!(ui.action(), Some(action));
+        }
+        ui.state.lock().unwrap().connected = false;
+    }
+}
+
+#[test]
+fn transport_buttons_are_disabled_while_disconnected() {
+    let state = AppState {
+        connected: false,
+        ..tracks(1)
+    };
+    let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
+    let mut ui = session.borrow_mut();
+    for glyph in [TransportGlyph::Play, TransportGlyph::Stop] {
+        let button = transport_button(&mut ui, glyph).unwrap();
+        let center = rect(&ui, button).center();
+        ui.harness.mouse_move(center);
+        ui.harness
+            .mouse_button_press(masonry::core::PointerButton::Primary);
+        ui.harness
+            .mouse_button_release(masonry::core::PointerButton::Primary);
+        assert!(ui.action().is_none());
+    }
+}
+
+#[test]
 fn scroll_and_focus_survive_meter_rebuilds_and_deleted_pages_fall_back() {
     let session = Session::new(tracks(12), view, Size::new(800.0, 450.0), 1.0);
     let portal;

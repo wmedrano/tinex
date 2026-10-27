@@ -1,4 +1,4 @@
-use tinex_widgets::MeterStyle;
+use tinex_widgets::{MeterStyle, TimelineStyle};
 use xilem::Color;
 use xilem::masonry::{
     core::DefaultProperties,
@@ -15,6 +15,9 @@ pub(super) const MUTED: Color = Color::from_rgb8(160, 166, 190);
 pub(super) const ERROR: Color = Color::from_rgb8(255, 85, 85);
 pub(super) const SURFACE: Color = Color::from_rgb8(48, 50, 64);
 pub(super) const SELECTED: Color = Color::from_rgb8(150, 45, 60);
+/// Lit play button while the transport runs.
+pub(super) const PLAYING: Color = Color::from_rgb8(80, 250, 123);
+pub(super) const PLAYING_ACTIVE: Color = Color::from_rgb8(50, 190, 90);
 
 pub(super) fn meter_style() -> MeterStyle {
     MeterStyle {
@@ -24,6 +27,16 @@ pub(super) fn meter_style() -> MeterStyle {
         near_ceiling: Color::from_rgb8(255, 184, 108),
         over: ERROR,
         reference: TEXT,
+    }
+}
+
+pub(super) fn timeline_style() -> TimelineStyle {
+    TimelineStyle {
+        trough: SURFACE,
+        elapsed: Color::from_rgb8(68, 71, 90),
+        bar_line: MUTED,
+        beat_tick: Color::from_rgb8(98, 102, 128),
+        playhead: Color::from_rgb8(255, 121, 198),
     }
 }
 

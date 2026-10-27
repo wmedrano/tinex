@@ -1,5 +1,5 @@
 use tinex_core::track::Track;
-use tinex_core::{TinexNotification, TinexRequest};
+use tinex_core::{Beat, TinexNotification, TinexRequest, TransportChange};
 use tinex_widgets::sanitize_level;
 
 use crate::gui::state::UiPluginInstance;
@@ -84,16 +84,33 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
         Action::Ui(UiAction::SetBpm(bpm)) if state.connected && bpm.is_finite() => {
             let bpm = bpm.clamp(MIN_BPM, MAX_BPM).round();
             if state.bpm != bpm {
-                let previous_bpm = state.bpm;
+                let change = TransportChange {
+                    bpm: Some(bpm),
+                    ..TransportChange::default()
+                };
+                set_transport(state, &mut result, change);
                 state.bpm = bpm;
-                // Requests are handled in order, so only an in-flight poll is stale.
-                state.bpm_stale |= state.level_request_in_flight;
-                result.effects.push(Effect {
-                    request: TinexRequest::SetBpm(bpm),
-                    operation: Operation::SetBpm { previous_bpm },
-                });
-                state.message = None;
-                result.changed = true;
+            }
+        }
+        Action::Ui(UiAction::TogglePlaying) if state.connected => {
+            let playing = !state.playing;
+            let change = TransportChange {
+                playing: Some(playing),
+                ..TransportChange::default()
+            };
+            set_transport(state, &mut result, change);
+            state.playing = playing;
+        }
+        Action::Ui(UiAction::Stop) if state.connected => {
+            if state.playing || state.beat != 0.0 {
+                let change = TransportChange {
+                    playing: Some(false),
+                    beat: Some(Beat::ZERO),
+                    ..TransportChange::default()
+                };
+                set_transport(state, &mut result, change);
+                state.playing = false;
+                state.beat = 0.0;
             }
         }
         Action::CpuLoad(load) => {
@@ -241,10 +258,23 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             transport,
         }) if state.connected => {
             state.level_request_in_flight = false;
-            if !std::mem::take(&mut state.bpm_stale) && transport.bpm.is_finite() {
-                result.changed |= state.bpm != transport.bpm;
-                state.bpm = transport.bpm;
+            if !std::mem::take(&mut state.transport_stale) {
+                if transport.bpm.is_finite() {
+                    result.changed |= state.bpm != transport.bpm;
+                    state.bpm = transport.bpm;
+                }
+                result.changed |= state.playing != transport.playing;
+                state.playing = transport.playing;
+                let beat = transport.beat.as_f64();
+                if beat.is_finite() {
+                    result.changed |= state.beat != beat;
+                    state.beat = beat;
+                }
             }
+            result.changed |= state.time_signature != transport.time_signature;
+            state.time_signature = transport.time_signature;
+            result.changed |= state.measures != transport.measures;
+            state.measures = transport.measures;
             let level = sanitize_level(output_level);
             result.changed |= state.master_output_level != level;
             state.master_output_level = level;
@@ -327,8 +357,10 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 Operation::Create(id) => {
                     state.pending.remove(&id);
                 }
-                Operation::SetBpm { previous_bpm } => {
-                    state.bpm = previous_bpm;
+                Operation::SetTransport { bpm, playing, beat } => {
+                    state.bpm = bpm;
+                    state.playing = playing;
+                    state.beat = beat;
                 }
                 Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
                 Operation::DeletePlugin {
@@ -367,12 +399,29 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
     result
 }
 
+/// Requests `change`, remembering the transport as shown so a failed send can restore it.
+fn set_transport(state: &mut AppState, result: &mut Update, change: TransportChange) {
+    // Requests are handled in order, so only an in-flight poll is stale.
+    state.transport_stale |= state.level_request_in_flight;
+    result.effects.push(Effect {
+        request: TinexRequest::SetTransport(change),
+        operation: Operation::SetTransport {
+            bpm: state.bpm,
+            playing: state.playing,
+            beat: state.beat,
+        },
+    });
+    state.message = None;
+    result.changed = true;
+}
+
 fn disconnect(state: &mut AppState) {
     state.connected = false;
     state.pending.clear();
     state.level_request_in_flight = false;
     state.arm_request_in_flight = false;
-    state.bpm_stale = false;
+    state.transport_stale = false;
+    state.playing = false;
     state.level_request_buffer.clear();
     state.master_output_level = 0.0;
     state.cpu_load = None;

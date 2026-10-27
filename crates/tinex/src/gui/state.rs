@@ -53,8 +53,15 @@ pub(super) struct AppState {
     pub master_output_level: f32,
     /// Requested tempo; engine reports overwrite it once they reflect the request.
     pub bpm: f32,
-    /// A status poll sent before the last tempo change reports the old tempo.
-    pub bpm_stale: bool,
+    /// Requested play state; engine reports overwrite it once they reflect the request.
+    pub playing: bool,
+    /// A status poll sent before the last transport change reports the old transport.
+    pub transport_stale: bool,
+    /// Last reported transport position in beats.
+    pub beat: f64,
+    pub time_signature: tinex_core::TimeSignature,
+    /// Arrangement length in bars.
+    pub measures: u32,
     /// JACK CPU utilization percentage, rounded to one decimal for display.
     pub cpu_load: Option<f32>,
     pub level_request_in_flight: bool,
@@ -76,7 +83,11 @@ impl Default for AppState {
             message: None,
             master_output_level: 0.0,
             bpm: 120.0,
-            bpm_stale: false,
+            playing: false,
+            transport_stale: false,
+            beat: 0.0,
+            time_signature: tinex_core::TimeSignature::default(),
+            measures: tinex_core::Transport::default().measures,
             cpu_load: None,
             level_request_in_flight: false,
             arm_request_in_flight: false,

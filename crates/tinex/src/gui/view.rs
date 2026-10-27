@@ -1,5 +1,8 @@
 //! Pure Xilem page construction. Semantic actions are dispatched above this tree.
-use tinex_widgets::{FONT_STACK, level_meter, percentage_meter, sanitize_level};
+use tinex_widgets::{
+    FONT_STACK, TransportGlyph, level_meter, percentage_meter, sanitize_level, timeline,
+    transport_icon,
+};
 use xilem::masonry::properties::{LineBreaking, Padding, types::Length};
 use xilem::style::Style;
 use xilem::view::{
@@ -19,6 +22,9 @@ mod plugins;
 mod track;
 
 type BoxView = Box<AnyWidgetView<AppState, UiAction>>;
+
+const TIMELINE_HEIGHT: f64 = 28.0;
+const TRANSPORT_BUTTON_WIDTH: f64 = 32.0;
 
 pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + use<> {
     let page = match state.page {
@@ -78,6 +84,20 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
                 .width(Length::px(24.0)),
             )),
             footer_group((
+                footer_caption(format!(
+                    "{}/{}",
+                    state.time_signature.numerator, state.time_signature.denominator
+                )),
+                // Fixed width keeps the meters from shifting as the bar number grows.
+                sized_box(
+                    label(position(state.beat, state.time_signature))
+                        .font(FONT_STACK)
+                        .text_size(12.0)
+                        .color(theme::TEXT),
+                )
+                .width(Length::px(40.0)),
+            )),
+            footer_group((
                 footer_caption("Master"),
                 level_meter(state.master_output_level, 176.0, 24.0, theme::meter_style()).flex(1.0),
             ))
@@ -106,14 +126,90 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
         .corner_radius(0.0),
     )
     .height(Length::px(32.0));
-    flex_col((page.flex(1.0), footer))
+    flex_col((page.flex(1.0), timeline_row(state), footer))
         .cross_axis_alignment(CrossAxisAlignment::Fill)
         .gap(Length::ZERO)
         .background_color(theme::BACKGROUND)
 }
 
-fn footer_caption(text: &'static str) -> impl WidgetView<AppState, UiAction> + use<> {
-    label(text)
+/// Transport buttons beside a ruler of the arrangement's bars with a moving playhead.
+fn timeline_row(state: &AppState) -> impl WidgetView<AppState, UiAction> + use<> {
+    let play = if state.playing {
+        (TransportGlyph::Pause, UiAction::TogglePlaying)
+    } else {
+        (TransportGlyph::Play, UiAction::TogglePlaying)
+    };
+    let buttons = [play, (TransportGlyph::Stop, UiAction::Stop)].map(|(glyph, action)| {
+        // Only play/pause lights up; stop is an action, not a state.
+        let lit = state.playing && action == UiAction::TogglePlaying;
+        let icon_color = if lit {
+            theme::BACKGROUND
+        } else if state.connected {
+            theme::TEXT
+        } else {
+            theme::MUTED
+        };
+        sized_box(traced(
+            xilem_button(
+                transport_icon(glyph, 10.0, icon_color),
+                move |_: &mut AppState| action,
+            )
+            .disabled(!state.connected)
+            .background_color(if lit {
+                theme::PLAYING
+            } else {
+                xilem::Color::from_rgb8(68, 71, 90)
+            })
+            .active_background_color(if lit {
+                theme::PLAYING_ACTIVE
+            } else {
+                xilem::Color::from_rgb8(98, 85, 130)
+            })
+            // The default 16px side padding would leave no room for the icon.
+            .padding(0.0)
+            .corner_radius(0.0),
+        ))
+        .width(Length::px(TRANSPORT_BUTTON_WIDTH))
+        .height(Length::px(TIMELINE_HEIGHT))
+    });
+    // One equal-width cell per bar lines each number up with its bar line.
+    let numbers = (1..=state.measures)
+        .map(|bar| {
+            sized_box(
+                label(bar.to_string())
+                    .font(FONT_STACK)
+                    .text_size(11.0)
+                    .color(theme::MUTED)
+                    .line_break_mode(LineBreaking::Clip),
+            )
+            .expand_width()
+            .padding(Padding::from_vh(1.0, 4.0))
+            .flex(1.0)
+        })
+        .collect::<Vec<_>>();
+    let ruler = zstack((
+        timeline(
+            state.beat,
+            u32::from(state.time_signature.numerator),
+            state.measures,
+            TIMELINE_HEIGHT,
+            theme::timeline_style(),
+        ),
+        flex_row(numbers).gap(Length::ZERO),
+    ));
+    sized_box(flex_row((buttons, ruler.flex(1.0))).gap(Length::ZERO))
+        .height(Length::px(TIMELINE_HEIGHT))
+}
+
+/// Formats a beat count as a one-based `bar.beat` position.
+fn position(beat: f64, time_signature: tinex_core::TimeSignature) -> String {
+    let beats_per_bar = u64::from(time_signature.numerator.max(1));
+    let beat = beat.max(0.0) as u64;
+    format!("{}.{}", beat / beats_per_bar + 1, beat % beats_per_bar + 1)
+}
+
+fn footer_caption<T: Into<String>>(text: T) -> impl WidgetView<AppState, UiAction> + use<T> {
+    label(text.into())
         .font(FONT_STACK)
         .text_size(12.0)
         .color(theme::MUTED)

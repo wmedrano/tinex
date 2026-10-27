@@ -812,8 +812,8 @@ fn bpm_changes_are_clamped_rounded_and_requested_once() {
         let result = update(&mut state, Action::Ui(UiAction::SetBpm(bpm)));
         assert!(result.changed);
         assert!(matches!(result.effects.as_slice(), [Effect {
-            request: TinexRequest::SetBpm(value), ..
-        }] if *value == expected));
+            request: TinexRequest::SetTransport(change), ..
+        }] if *change == TransportChange { bpm: Some(expected), ..Default::default() }));
         assert_eq!(state.bpm, expected);
         let repeated = update(&mut state, Action::Ui(UiAction::SetBpm(bpm)));
         assert!(!repeated.changed && repeated.effects.is_empty());
@@ -834,7 +834,10 @@ fn bpm_ignores_polls_sent_before_the_change_and_restores_failed_requests() {
         Action::Notification(TinexNotification::Status {
             output_level: 0.0,
             tracks: Default::default(),
-            transport: tinex_core::Transport { bpm },
+            transport: tinex_core::Transport {
+                bpm,
+                ..tinex_core::Transport::default()
+            },
         })
     };
     let mut state = AppState::default();
@@ -863,5 +866,114 @@ fn bpm_ignores_polls_sent_before_the_change_and_restores_failed_requests() {
     };
     update(&mut state, Action::RequestFailed(*operation));
     assert_eq!(state.bpm, previous);
+    assert!(!state.connected);
+}
+
+fn transport_status(transport: tinex_core::Transport) -> Action {
+    Action::Notification(TinexNotification::Status {
+        output_level: 0.0,
+        tracks: Default::default(),
+        transport,
+    })
+}
+
+fn requested_change(result: &Update) -> TransportChange {
+    match result.effects.as_slice() {
+        [
+            Effect {
+                request: TinexRequest::SetTransport(change),
+                ..
+            },
+        ] => *change,
+        _ => panic!("expected one transport request"),
+    }
+}
+
+#[test]
+fn play_pause_toggles_playing_and_stop_also_rewinds() {
+    let mut state = AppState::default();
+    assert!(!state.playing, "the engine starts stopped");
+
+    let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
+    assert!(result.changed && state.playing);
+    let play = TransportChange {
+        playing: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(requested_change(&result), play);
+
+    update(
+        &mut state,
+        transport_status(tinex_core::Transport {
+            playing: true,
+            ..Default::default()
+        }),
+    );
+    state.beat = 6.5;
+    let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
+    assert!(!state.playing);
+    assert_eq!(state.beat, 6.5, "pausing keeps the position");
+    let pause = TransportChange {
+        playing: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(requested_change(&result), pause);
+
+    let result = update(&mut state, Action::Ui(UiAction::Stop));
+    assert!(result.changed && !state.playing);
+    assert_eq!(state.beat, 0.0);
+    let stop = TransportChange {
+        playing: Some(false),
+        beat: Some(tinex_core::Beat::ZERO),
+        ..Default::default()
+    };
+    assert_eq!(requested_change(&result), stop);
+
+    // Already stopped at the start: nothing to send.
+    let repeated = update(&mut state, Action::Ui(UiAction::Stop));
+    assert!(!repeated.changed && repeated.effects.is_empty());
+
+    update(&mut state, Action::Disconnected);
+    for action in [UiAction::TogglePlaying, UiAction::Stop] {
+        let ignored = update(&mut state, Action::Ui(action));
+        assert!(!ignored.changed && ignored.effects.is_empty());
+    }
+}
+
+#[test]
+fn transport_ignores_polls_sent_before_the_change_and_restores_failed_requests() {
+    let mut state = AppState::default();
+    update(
+        &mut state,
+        transport_status(tinex_core::Transport {
+            playing: true,
+            ..Default::default()
+        }),
+    );
+    assert!(state.playing);
+
+    // This poll was queued before Stop, so its reply still says playing.
+    update(&mut state, Action::SampleLevels);
+    update(&mut state, Action::Ui(UiAction::Stop));
+    update(
+        &mut state,
+        transport_status(tinex_core::Transport {
+            playing: true,
+            ..Default::default()
+        }),
+    );
+    assert!(!state.playing);
+
+    // The next reply is authoritative again.
+    update(&mut state, Action::SampleLevels);
+    update(&mut state, transport_status(Default::default()));
+    assert!(!state.playing);
+
+    let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
+    let [Effect { operation, .. }] = result.effects.as_slice() else {
+        panic!("expected one effect");
+    };
+    update(&mut state, Action::RequestFailed(*operation));
+    assert!(!state.playing);
     assert!(!state.connected);
 }

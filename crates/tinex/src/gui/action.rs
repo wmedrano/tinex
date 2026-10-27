@@ -28,6 +28,9 @@ pub(super) enum UiAction {
     DeleteTrack(TrackId),
     ToggleTrackArm(TrackId),
     SetBpm(f32),
+    TogglePlaying,
+    /// Pause and return to the start of the arrangement.
+    Stop,
 }
 
 pub(super) enum Action {
@@ -48,8 +51,11 @@ pub(super) enum Operation {
     Create(TrackId),
     Delete(TrackId),
     ArmTracks,
-    SetBpm {
-        previous_bpm: f32,
+    /// The transport as the GUI showed it before the change.
+    SetTransport {
+        bpm: f32,
+        playing: bool,
+        beat: f64,
     },
     AddPlugin,
     DeletePlugin {
