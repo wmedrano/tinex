@@ -31,6 +31,7 @@ pub enum TinexRequest {
 pub struct TransportChange {
     pub bpm: Option<f32>,
     pub playing: Option<bool>,
+    pub recording: Option<bool>,
     /// Positions past the end of the arrangement wrap on the next block.
     pub beat: Option<Beat>,
 }

@@ -101,6 +101,15 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
             set_transport(state, &mut result, change);
             state.playing = playing;
         }
+        Action::Ui(UiAction::ToggleRecording) if state.connected => {
+            let recording = !state.recording;
+            let change = TransportChange {
+                recording: Some(recording),
+                ..TransportChange::default()
+            };
+            set_transport(state, &mut result, change);
+            state.recording = recording;
+        }
         Action::Ui(UiAction::Stop) if state.connected => {
             if state.playing || state.beat != 0.0 {
                 let change = TransportChange {
@@ -265,6 +274,8 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 }
                 result.changed |= state.playing != transport.playing;
                 state.playing = transport.playing;
+                result.changed |= state.recording != transport.recording;
+                state.recording = transport.recording;
                 let beat = transport.beat.as_f64();
                 if beat.is_finite() {
                     result.changed |= state.beat != beat;
@@ -357,9 +368,15 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 Operation::Create(id) => {
                     state.pending.remove(&id);
                 }
-                Operation::SetTransport { bpm, playing, beat } => {
+                Operation::SetTransport {
+                    bpm,
+                    playing,
+                    recording,
+                    beat,
+                } => {
                     state.bpm = bpm;
                     state.playing = playing;
+                    state.recording = recording;
                     state.beat = beat;
                 }
                 Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
@@ -408,6 +425,7 @@ fn set_transport(state: &mut AppState, result: &mut Update, change: TransportCha
         operation: Operation::SetTransport {
             bpm: state.bpm,
             playing: state.playing,
+            recording: state.recording,
             beat: state.beat,
         },
     });
@@ -422,6 +440,7 @@ fn disconnect(state: &mut AppState) {
     state.arm_request_in_flight = false;
     state.transport_stale = false;
     state.playing = false;
+    state.recording = false;
     state.level_request_buffer.clear();
     state.master_output_level = 0.0;
     state.cpu_load = None;

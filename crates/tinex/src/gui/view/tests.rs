@@ -834,8 +834,8 @@ fn timeline_spans_the_window_above_the_footer_with_one_number_per_bar() {
         let mut ui = session.borrow_mut();
         let timeline = ui.widgets::<tinex_widgets::TimelineWidget>()[0];
         let bounds = rect(&ui, timeline);
-        // Play/pause and stop sit at the row's left end.
-        let start = 2.0 * TRANSPORT_BUTTON_WIDTH;
+        // Play/pause, stop, and record sit at the row's left end.
+        let start = 3.0 * TRANSPORT_BUTTON_WIDTH;
         assert_eq!(
             bounds,
             Rect::new(start, height - 60.0, width, height - 32.0)
@@ -863,13 +863,14 @@ fn transport_button<V: WidgetView<AppState, UiAction>>(
 }
 
 #[test]
-fn transport_buttons_toggle_playing_and_stop_beside_the_timeline() {
-    for (playing, shown, hidden) in [
-        (false, TransportGlyph::Play, TransportGlyph::Pause),
-        (true, TransportGlyph::Pause, TransportGlyph::Play),
+fn transport_buttons_toggle_playing_stop_and_recording_beside_the_timeline() {
+    for (playing, recording, shown, hidden) in [
+        (false, false, TransportGlyph::Play, TransportGlyph::Pause),
+        (true, true, TransportGlyph::Pause, TransportGlyph::Play),
     ] {
         let state = AppState {
             playing,
+            recording,
             ..tracks(1)
         };
         let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
@@ -880,16 +881,17 @@ fn transport_buttons_toggle_playing_and_stop_beside_the_timeline() {
         for (index, (glyph, action)) in [
             (shown, UiAction::TogglePlaying),
             (TransportGlyph::Stop, UiAction::Stop),
+            (TransportGlyph::Record, UiAction::ToggleRecording),
         ]
         .into_iter()
         .enumerate()
         {
             let button = transport_button(&mut ui, glyph).unwrap();
-            // Only the play/pause button lights up, and only while playing.
-            let background = if playing && action == UiAction::TogglePlaying {
-                theme::PLAYING
-            } else {
-                xilem::Color::from_rgb8(68, 71, 90)
+            // Play/pause and record light up with their respective states; stop does not.
+            let background = match action {
+                UiAction::TogglePlaying if playing => theme::PLAYING,
+                UiAction::ToggleRecording if recording => theme::RECORDING,
+                _ => xilem::Color::from_rgb8(68, 71, 90),
             };
             assert_eq!(
                 *ui.harness
@@ -927,7 +929,11 @@ fn transport_buttons_are_disabled_while_disconnected() {
     };
     let session = Session::new(state, view, Size::new(800.0, 450.0), 1.0);
     let mut ui = session.borrow_mut();
-    for glyph in [TransportGlyph::Play, TransportGlyph::Stop] {
+    for glyph in [
+        TransportGlyph::Play,
+        TransportGlyph::Stop,
+        TransportGlyph::Record,
+    ] {
         let button = transport_button(&mut ui, glyph).unwrap();
         let center = rect(&ui, button).center();
         ui.harness.mouse_move(center);

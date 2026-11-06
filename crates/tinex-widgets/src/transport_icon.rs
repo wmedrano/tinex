@@ -1,11 +1,11 @@
-//! Painted play, pause, and stop symbols, which the bundled fonts lack.
+//! Painted play, pause, stop, and record symbols, which the bundled fonts lack.
 use xilem::Color;
 use xilem::core::{MessageContext, MessageResult, Mut, View, ViewMarker};
 use xilem::masonry::accesskit::{Node, Role};
 use xilem::masonry::core::{
     AccessCtx, BoxConstraints, ChildrenIds, LayoutCtx, NoAction, PaintCtx, PropertiesRef, Widget,
 };
-use xilem::masonry::kurbo::{Affine, BezPath, Rect, Shape, Size};
+use xilem::masonry::kurbo::{Affine, BezPath, Circle, Rect, Shape, Size};
 use xilem::masonry::peniko::Fill;
 use xilem::masonry::vello::Scene;
 use xilem::{Pod, ViewCtx};
@@ -15,6 +15,7 @@ pub enum TransportGlyph {
     Play,
     Pause,
     Stop,
+    Record,
 }
 
 impl TransportGlyph {
@@ -24,6 +25,7 @@ impl TransportGlyph {
             TransportGlyph::Play => "Play",
             TransportGlyph::Pause => "Pause",
             TransportGlyph::Stop => "Stop",
+            TransportGlyph::Record => "Record",
         }
     }
 }
@@ -87,6 +89,9 @@ impl Widget for TransportIconWidget {
             TransportGlyph::Stop => {
                 let inset = side * 0.1;
                 Rect::new(x + inset, y + inset, x + side - inset, y + side - inset).to_path(0.1)
+            }
+            TransportGlyph::Record => {
+                Circle::new((x + side / 2.0, y + side / 2.0), side * 0.45).to_path(0.1)
             }
         };
         scene.fill(Fill::NonZero, Affine::IDENTITY, self.color, None, &path);
@@ -177,6 +182,7 @@ mod tests {
             TransportGlyph::Play,
             TransportGlyph::Pause,
             TransportGlyph::Stop,
+            TransportGlyph::Record,
         ] {
             let harness = TestHarness::create_with_size(
                 masonry::theme::default_property_set(),

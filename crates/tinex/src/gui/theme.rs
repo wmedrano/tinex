@@ -18,6 +18,9 @@ pub(super) const SELECTED: Color = Color::from_rgb8(150, 45, 60);
 /// Lit play button while the transport runs.
 pub(super) const PLAYING: Color = Color::from_rgb8(80, 250, 123);
 pub(super) const PLAYING_ACTIVE: Color = Color::from_rgb8(50, 190, 90);
+/// Lit record button while the transport records.
+pub(super) const RECORDING: Color = Color::from_rgb8(255, 85, 85);
+pub(super) const RECORDING_ACTIVE: Color = Color::from_rgb8(200, 55, 55);
 
 pub(super) fn meter_style() -> MeterStyle {
     MeterStyle {

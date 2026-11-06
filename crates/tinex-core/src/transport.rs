@@ -2,6 +2,7 @@
 pub struct Transport {
     pub bpm: f32,
     pub playing: bool,
+    pub recording: bool,
     pub beat: Beat,
     pub time_signature: TimeSignature,
     /// Length of the arrangement in measures.
@@ -43,6 +44,7 @@ impl Default for Transport {
         Transport {
             bpm: 120.0,
             playing: false,
+            recording: false,
             beat: Beat::ZERO,
             time_signature: TimeSignature::default(),
             measures: 4,
@@ -106,6 +108,7 @@ mod tests {
                 denominator: 4,
             },
             measures: 2,
+            ..Transport::default()
         }
     }
 

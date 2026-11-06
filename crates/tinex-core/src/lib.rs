@@ -127,6 +127,7 @@ impl Tinex {
                     let transport = &mut self.transport;
                     transport.bpm = change.bpm.unwrap_or(transport.bpm);
                     transport.playing = change.playing.unwrap_or(transport.playing);
+                    transport.recording = change.recording.unwrap_or(transport.recording);
                     transport.beat = change.beat.unwrap_or(transport.beat);
                 }
                 TinexRequest::PollStatus {
@@ -245,16 +246,19 @@ mod tests {
         let (notifications, received) = mpsc::channel();
         let mut tinex = Tinex::new(receiver, notifications);
         assert!(!tinex.transport.playing, "the engine starts stopped");
+        assert!(!tinex.transport.recording);
 
         let change = TransportChange {
             bpm: Some(90.0),
             playing: Some(true),
+            recording: Some(true),
             ..TransportChange::default()
         };
         sender.send(TinexRequest::SetTransport(change)).unwrap();
         process(&mut tinex, &received);
         assert_eq!(tinex.transport.bpm, 90.0);
         assert!(tinex.transport.playing);
+        assert!(tinex.transport.recording);
         assert!(tinex.transport.beat.as_f64() > 0.0);
 
         let stop = TransportChange {
@@ -266,6 +270,20 @@ mod tests {
         process(&mut tinex, &received);
         assert_eq!(tinex.transport.bpm, 90.0);
         assert!(!tinex.transport.playing);
+        assert!(tinex.transport.recording);
+        assert_eq!(tinex.transport.beat, Beat::ZERO);
+
+        let stop_recording = TransportChange {
+            recording: Some(false),
+            ..TransportChange::default()
+        };
+        sender
+            .send(TinexRequest::SetTransport(stop_recording))
+            .unwrap();
+        process(&mut tinex, &received);
+        assert_eq!(tinex.transport.bpm, 90.0);
+        assert!(!tinex.transport.playing);
+        assert!(!tinex.transport.recording);
         assert_eq!(tinex.transport.beat, Beat::ZERO);
     }
 

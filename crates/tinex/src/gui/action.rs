@@ -29,6 +29,7 @@ pub(super) enum UiAction {
     ToggleTrackArm(TrackId),
     SetBpm(f32),
     TogglePlaying,
+    ToggleRecording,
     /// Pause and return to the start of the arrangement.
     Stop,
 }
@@ -55,6 +56,7 @@ pub(super) enum Operation {
     SetTransport {
         bpm: f32,
         playing: bool,
+        recording: bool,
         beat: f64,
     },
     AddPlugin,

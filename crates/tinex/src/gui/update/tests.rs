@@ -890,9 +890,10 @@ fn requested_change(result: &Update) -> TransportChange {
 }
 
 #[test]
-fn play_pause_toggles_playing_and_stop_also_rewinds() {
+fn play_pause_record_and_stop_update_transport_state() {
     let mut state = AppState::default();
     assert!(!state.playing, "the engine starts stopped");
+    assert!(!state.recording);
 
     let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
     assert!(result.changed && state.playing);
@@ -902,16 +903,25 @@ fn play_pause_toggles_playing_and_stop_also_rewinds() {
     };
     assert_eq!(requested_change(&result), play);
 
+    let result = update(&mut state, Action::Ui(UiAction::ToggleRecording));
+    assert!(result.changed && state.recording && state.playing);
+    let record = TransportChange {
+        recording: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(requested_change(&result), record);
+
     update(
         &mut state,
         transport_status(tinex_core::Transport {
             playing: true,
+            recording: true,
             ..Default::default()
         }),
     );
     state.beat = 6.5;
     let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
-    assert!(!state.playing);
+    assert!(!state.playing && state.recording);
     assert_eq!(state.beat, 6.5, "pausing keeps the position");
     let pause = TransportChange {
         playing: Some(false),
@@ -920,7 +930,7 @@ fn play_pause_toggles_playing_and_stop_also_rewinds() {
     assert_eq!(requested_change(&result), pause);
 
     let result = update(&mut state, Action::Ui(UiAction::Stop));
-    assert!(result.changed && !state.playing);
+    assert!(result.changed && !state.playing && state.recording);
     assert_eq!(state.beat, 0.0);
     let stop = TransportChange {
         playing: Some(false),
@@ -933,8 +943,20 @@ fn play_pause_toggles_playing_and_stop_also_rewinds() {
     let repeated = update(&mut state, Action::Ui(UiAction::Stop));
     assert!(!repeated.changed && repeated.effects.is_empty());
 
+    let result = update(&mut state, Action::Ui(UiAction::ToggleRecording));
+    assert!(result.changed && !state.recording);
+    let stop_record = TransportChange {
+        recording: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(requested_change(&result), stop_record);
+
     update(&mut state, Action::Disconnected);
-    for action in [UiAction::TogglePlaying, UiAction::Stop] {
+    for action in [
+        UiAction::TogglePlaying,
+        UiAction::ToggleRecording,
+        UiAction::Stop,
+    ] {
         let ignored = update(&mut state, Action::Ui(action));
         assert!(!ignored.changed && ignored.effects.is_empty());
     }
@@ -947,10 +969,11 @@ fn transport_ignores_polls_sent_before_the_change_and_restores_failed_requests()
         &mut state,
         transport_status(tinex_core::Transport {
             playing: true,
+            recording: true,
             ..Default::default()
         }),
     );
-    assert!(state.playing);
+    assert!(state.playing && state.recording);
 
     // This poll was queued before Stop, so its reply still says playing.
     update(&mut state, Action::SampleLevels);
@@ -959,21 +982,22 @@ fn transport_ignores_polls_sent_before_the_change_and_restores_failed_requests()
         &mut state,
         transport_status(tinex_core::Transport {
             playing: true,
+            recording: true,
             ..Default::default()
         }),
     );
-    assert!(!state.playing);
+    assert!(!state.playing && state.recording);
 
     // The next reply is authoritative again.
     update(&mut state, Action::SampleLevels);
     update(&mut state, transport_status(Default::default()));
-    assert!(!state.playing);
+    assert!(!state.playing && !state.recording);
 
-    let result = update(&mut state, Action::Ui(UiAction::TogglePlaying));
+    let result = update(&mut state, Action::Ui(UiAction::ToggleRecording));
     let [Effect { operation, .. }] = result.effects.as_slice() else {
         panic!("expected one effect");
     };
     update(&mut state, Action::RequestFailed(*operation));
-    assert!(!state.playing);
+    assert!(!state.recording);
     assert!(!state.connected);
 }

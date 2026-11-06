@@ -139,32 +139,41 @@ fn timeline_row(state: &AppState) -> impl WidgetView<AppState, UiAction> + use<>
     } else {
         (TransportGlyph::Play, UiAction::TogglePlaying)
     };
-    let buttons = [play, (TransportGlyph::Stop, UiAction::Stop)].map(|(glyph, action)| {
-        // Only play/pause lights up; stop is an action, not a state.
-        let lit = state.playing && action == UiAction::TogglePlaying;
-        let icon_color = if lit {
+    let buttons = [
+        play,
+        (TransportGlyph::Stop, UiAction::Stop),
+        (TransportGlyph::Record, UiAction::ToggleRecording),
+    ]
+    .map(|(glyph, action)| {
+        // Play/pause and record light up with their respective states; stop is an action.
+        let lit_colors = match action {
+            UiAction::TogglePlaying if state.playing => {
+                Some((theme::PLAYING, theme::PLAYING_ACTIVE))
+            }
+            UiAction::ToggleRecording if state.recording => {
+                Some((theme::RECORDING, theme::RECORDING_ACTIVE))
+            }
+            _ => None,
+        };
+        let icon_color = if lit_colors.is_some() {
             theme::BACKGROUND
         } else if state.connected {
             theme::TEXT
         } else {
             theme::MUTED
         };
+        let (background, active_background) = lit_colors.unwrap_or((
+            xilem::Color::from_rgb8(68, 71, 90),
+            xilem::Color::from_rgb8(98, 85, 130),
+        ));
         sized_box(traced(
             xilem_button(
                 transport_icon(glyph, 10.0, icon_color),
                 move |_: &mut AppState| action,
             )
             .disabled(!state.connected)
-            .background_color(if lit {
-                theme::PLAYING
-            } else {
-                xilem::Color::from_rgb8(68, 71, 90)
-            })
-            .active_background_color(if lit {
-                theme::PLAYING_ACTIVE
-            } else {
-                xilem::Color::from_rgb8(98, 85, 130)
-            })
+            .background_color(background)
+            .active_background_color(active_background)
             // The default 16px side padding would leave no room for the icon.
             .padding(0.0)
             .corner_radius(0.0),

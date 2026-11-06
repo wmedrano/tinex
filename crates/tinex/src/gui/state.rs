@@ -55,6 +55,8 @@ pub(super) struct AppState {
     pub bpm: f32,
     /// Requested play state; engine reports overwrite it once they reflect the request.
     pub playing: bool,
+    /// Requested record state; engine reports overwrite it once they reflect the request.
+    pub recording: bool,
     /// A status poll sent before the last transport change reports the old transport.
     pub transport_stale: bool,
     /// Last reported transport position in beats.
@@ -84,6 +86,7 @@ impl Default for AppState {
             master_output_level: 0.0,
             bpm: 120.0,
             playing: false,
+            recording: false,
             transport_stale: false,
             beat: 0.0,
             time_signature: tinex_core::TimeSignature::default(),
