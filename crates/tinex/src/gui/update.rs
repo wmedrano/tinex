@@ -9,6 +9,9 @@ use super::state::{AppState, Page, PendingTrack, UiTrack};
 
 pub(super) const MIN_BPM: f32 = 20.0;
 pub(super) const MAX_BPM: f32 = 300.0;
+pub(super) const METRONOME_OFF_DB: f32 = -25.0;
+pub(super) const MIN_METRONOME_DB: f32 = -24.0;
+pub(super) const MAX_METRONOME_DB: f32 = 6.0;
 
 #[derive(Default)]
 pub(super) struct Update {
@@ -90,6 +93,17 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 };
                 set_transport(state, &mut result, change);
                 state.bpm = bpm;
+            }
+        }
+        Action::Ui(UiAction::SetMetronomeVolume(db)) if state.connected && db.is_finite() => {
+            let db = db.clamp(METRONOME_OFF_DB, MAX_METRONOME_DB).round();
+            if state.metronome_volume_db != db {
+                let change = TransportChange {
+                    metronome_volume: Some(metronome_gain(db)),
+                    ..TransportChange::default()
+                };
+                set_transport(state, &mut result, change);
+                state.metronome_volume_db = db;
             }
         }
         Action::Ui(UiAction::TogglePlaying) if state.connected => {
@@ -276,6 +290,9 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                 state.playing = transport.playing;
                 result.changed |= state.recording != transport.recording;
                 state.recording = transport.recording;
+                let metronome_db = metronome_db_from_gain(transport.metronome_volume);
+                result.changed |= state.metronome_volume_db != metronome_db;
+                state.metronome_volume_db = metronome_db;
                 let beat = transport.beat.as_f64();
                 if beat.is_finite() {
                     result.changed |= state.beat != beat;
@@ -372,11 +389,13 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Update {
                     bpm,
                     playing,
                     recording,
+                    metronome_volume_db,
                     beat,
                 } => {
                     state.bpm = bpm;
                     state.playing = playing;
                     state.recording = recording;
+                    state.metronome_volume_db = metronome_volume_db;
                     state.beat = beat;
                 }
                 Operation::SampleLevels | Operation::AddPlugin | Operation::ArmTracks => {}
@@ -426,11 +445,33 @@ fn set_transport(state: &mut AppState, result: &mut Update, change: TransportCha
             bpm: state.bpm,
             playing: state.playing,
             recording: state.recording,
+            metronome_volume_db: state.metronome_volume_db,
             beat: state.beat,
         },
     });
     state.message = None;
     result.changed = true;
+}
+
+fn metronome_gain(db: f32) -> f32 {
+    if db <= METRONOME_OFF_DB {
+        0.0
+    } else {
+        10.0_f32.powf(db / 20.0)
+    }
+}
+
+fn metronome_db_from_gain(gain: f32) -> f32 {
+    if !gain.is_finite() || gain <= 0.0 {
+        METRONOME_OFF_DB
+    } else {
+        let db = (20.0 * gain.log10()).round();
+        if db < MIN_METRONOME_DB {
+            METRONOME_OFF_DB
+        } else {
+            db.clamp(MIN_METRONOME_DB, MAX_METRONOME_DB)
+        }
+    }
 }
 
 fn disconnect(state: &mut AppState) {

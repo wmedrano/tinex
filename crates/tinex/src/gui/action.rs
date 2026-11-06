@@ -28,6 +28,7 @@ pub(super) enum UiAction {
     DeleteTrack(TrackId),
     ToggleTrackArm(TrackId),
     SetBpm(f32),
+    SetMetronomeVolume(f32),
     TogglePlaying,
     ToggleRecording,
     /// Pause and return to the start of the arrangement.
@@ -57,6 +58,7 @@ pub(super) enum Operation {
         bpm: f32,
         playing: bool,
         recording: bool,
+        metronome_volume_db: f32,
         beat: f64,
     },
     AddPlugin,

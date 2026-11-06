@@ -15,7 +15,7 @@ use super::{
     action::UiAction,
     state::{AppState, Page, UiTrack},
     theme,
-    update::{MAX_BPM, MIN_BPM},
+    update::{MAX_BPM, MAX_METRONOME_DB, METRONOME_OFF_DB, MIN_BPM},
 };
 mod main;
 mod plugins;
@@ -73,7 +73,7 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
                 ))
                 // Masonry sliders are never narrower than 100px, so a flex share
                 // would overflow the footer at the minimum window width.
-                .width(Length::px(100.0)),
+                .width(Length::px(50.0)),
                 // Fixed width keeps the meters from shifting as the digit count changes.
                 sized_box(
                     label(format!("{:.0}", state.bpm))
@@ -82,6 +82,31 @@ pub(super) fn view(state: &AppState) -> impl WidgetView<AppState, UiAction> + us
                         .color(theme::TEXT),
                 )
                 .width(Length::px(24.0)),
+            )),
+            footer_group((
+                footer_caption("Click"),
+                sized_box(traced(
+                    slider(
+                        f64::from(METRONOME_OFF_DB),
+                        f64::from(MAX_METRONOME_DB),
+                        f64::from(state.metronome_volume_db),
+                        |_: &mut AppState, db| UiAction::SetMetronomeVolume(db as f32),
+                    )
+                    .step(1.0)
+                    .disabled(!state.connected),
+                ))
+                .width(Length::px(50.0)),
+                sized_box(
+                    label(if state.metronome_volume_db <= METRONOME_OFF_DB {
+                        "−∞ dB".into()
+                    } else {
+                        format!("{:+.0} dB", state.metronome_volume_db)
+                    })
+                    .font(FONT_STACK)
+                    .text_size(12.0)
+                    .color(theme::TEXT),
+                )
+                .width(Length::px(38.0)),
             )),
             footer_group((
                 footer_caption(format!(

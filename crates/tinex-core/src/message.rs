@@ -32,6 +32,7 @@ pub struct TransportChange {
     pub bpm: Option<f32>,
     pub playing: Option<bool>,
     pub recording: Option<bool>,
+    pub metronome_volume: Option<f32>,
     /// Positions past the end of the arrangement wrap on the next block.
     pub beat: Option<Beat>,
 }

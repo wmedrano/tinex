@@ -3,6 +3,8 @@ pub struct Transport {
     pub bpm: f32,
     pub playing: bool,
     pub recording: bool,
+    /// Linear gain of the metronome click (`0.0` is off).
+    pub metronome_volume: f32,
     pub beat: Beat,
     pub time_signature: TimeSignature,
     /// Length of the arrangement in measures.
@@ -45,6 +47,7 @@ impl Default for Transport {
             bpm: 120.0,
             playing: false,
             recording: false,
+            metronome_volume: 0.0,
             beat: Beat::ZERO,
             time_signature: TimeSignature::default(),
             measures: 4,

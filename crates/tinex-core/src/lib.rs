@@ -3,13 +3,14 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use wmidi::MidiMessage;
 
-use crate::track::Track;
+use crate::{metronome::Metronome, track::Track};
 pub use message::{TinexNotification, TinexRequest, TransportChange};
 pub use sequence::{MidiEvent, MidiSequence};
 pub use transport::{Beat, TimeSignature, Transport};
 
 pub mod id;
 mod message;
+mod metronome;
 pub mod plugin;
 pub mod sequence;
 pub mod track;
@@ -21,6 +22,7 @@ const OUTPUT_LEVEL_TIME_CONSTANT: f64 = 0.1;
 
 pub struct Tinex {
     transport: Transport,
+    metronome: Metronome,
     tracks: Vec<Track>,
     output_level: f64,
     requests: Receiver<TinexRequest>,
@@ -43,6 +45,7 @@ impl Tinex {
     ) -> Tinex {
         Tinex {
             transport: Transport::default(),
+            metronome: Metronome::default(),
             tracks: Vec::with_capacity(TRACK_CAPACITY),
             output_level: 0.0,
             requests,
@@ -53,19 +56,25 @@ impl Tinex {
     /// Handles pending requests, processes audio, and updates the weighted peak output level.
     pub fn process(&mut self, mut args: ProcessArgs<'_, '_>) {
         self.handle_requests();
-        self.process_tracks(&mut args);
-        self.update_output_level(&args);
-    }
-
-    fn process_tracks(&mut self, args: &mut ProcessArgs<'_, '_>) {
-        for channel in args.output.iter_mut() {
-            channel.fill(0.0);
-        }
         let beats = self.transport.compute_beat_at_frame(
             args.output[0].len(),
             args.sample_rate,
             args.arena,
         );
+        self.process_tracks(&mut args, beats);
+        self.update_output_level(&args);
+        self.metronome.process(
+            beats,
+            self.transport,
+            args.sample_rate,
+            &mut args.output,
+        );
+    }
+
+    fn process_tracks(&mut self, args: &mut ProcessArgs<'_, '_>, beats: &[Beat]) {
+        for channel in args.output.iter_mut() {
+            channel.fill(0.0);
+        }
         if self.tracks.is_empty() {
             return;
         }
@@ -131,6 +140,9 @@ impl Tinex {
                     transport.bpm = change.bpm.unwrap_or(transport.bpm);
                     transport.playing = change.playing.unwrap_or(transport.playing);
                     transport.recording = change.recording.unwrap_or(transport.recording);
+                    transport.metronome_volume = change
+                        .metronome_volume
+                        .unwrap_or(transport.metronome_volume);
                     transport.beat = change.beat.unwrap_or(transport.beat);
                 }
                 TinexRequest::PollStatus {
@@ -250,6 +262,7 @@ mod tests {
         let mut tinex = Tinex::new(receiver, notifications);
         assert!(!tinex.transport.playing, "the engine starts stopped");
         assert!(!tinex.transport.recording);
+        assert_eq!(tinex.transport.metronome_volume, 0.0);
 
         let change = TransportChange {
             bpm: Some(90.0),
@@ -262,10 +275,12 @@ mod tests {
         assert_eq!(tinex.transport.bpm, 90.0);
         assert!(tinex.transport.playing);
         assert!(tinex.transport.recording);
+        assert_eq!(tinex.transport.metronome_volume, 0.0);
         assert!(tinex.transport.beat.as_f64() > 0.0);
 
         let stop = TransportChange {
             playing: Some(false),
+            metronome_volume: Some(0.5),
             beat: Some(Beat::ZERO),
             ..TransportChange::default()
         };
@@ -274,6 +289,7 @@ mod tests {
         assert_eq!(tinex.transport.bpm, 90.0);
         assert!(!tinex.transport.playing);
         assert!(tinex.transport.recording);
+        assert_eq!(tinex.transport.metronome_volume, 0.5);
         assert_eq!(tinex.transport.beat, Beat::ZERO);
 
         let stop_recording = TransportChange {
@@ -287,7 +303,65 @@ mod tests {
         assert_eq!(tinex.transport.bpm, 90.0);
         assert!(!tinex.transport.playing);
         assert!(!tinex.transport.recording);
+        assert_eq!(tinex.transport.metronome_volume, 0.5);
         assert_eq!(tinex.transport.beat, Beat::ZERO);
+    }
+
+    #[test]
+    fn metronome_mixes_after_metering_and_scales_with_volume() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        let arena = bumpalo::Bump::new();
+
+        sender
+            .send(TinexRequest::SetTransport(TransportChange {
+                playing: Some(true),
+                metronome_volume: Some(0.5),
+                ..TransportChange::default()
+            }))
+            .unwrap();
+        let mut left = [0.0; 8];
+        let mut right = [0.0; 8];
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &[],
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        assert!(left.iter().any(|&sample| sample != 0.0));
+        assert_eq!(left, right);
+        let half_volume_first = left[0];
+
+        // Master metering is computed before the metronome is mixed into the output.
+        sender
+            .send(TinexRequest::PollStatus {
+                requested_tracks: HashMap::new(),
+            })
+            .unwrap();
+        sender
+            .send(TinexRequest::SetTransport(TransportChange {
+                beat: Some(Beat::ZERO),
+                metronome_volume: Some(1.0),
+                ..TransportChange::default()
+            }))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 48_000,
+            input: [&[], &[]],
+            midi_input: &[],
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            TinexNotification::Status {
+                output_level: 0.0,
+                ..
+            }
+        ));
+        assert!((left[0] - half_volume_first * 2.0).abs() < 1e-6);
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub(super) struct AppState {
     pub playing: bool,
     /// Requested record state; engine reports overwrite it once they reflect the request.
     pub recording: bool,
+    /// Requested metronome dB setting (-24..=6); -25 represents off.
+    pub metronome_volume_db: f32,
     /// A status poll sent before the last transport change reports the old transport.
     pub transport_stale: bool,
     /// Last reported transport position in beats.
@@ -87,6 +89,7 @@ impl Default for AppState {
             bpm: 120.0,
             playing: false,
             recording: false,
+            metronome_volume_db: -25.0,
             transport_stale: false,
             beat: 0.0,
             time_signature: tinex_core::TimeSignature::default(),
