@@ -1,17 +1,25 @@
 use wmidi::MidiMessage;
 
-use crate::plugin::{Plugin, PluginInstance, PluginInstanceId};
+use crate::{
+    Beat,
+    plugin::{Plugin, PluginInstance, PluginInstanceId},
+    sequence::MidiSequence,
+};
 
 use super::{id::Id, output_level_weight};
+
+const MIDI_SCRATCH_CAPACITY: usize = 256;
 
 pub type TrackId = Id<Track>;
 
 pub struct Track {
     pub volume: f32,
     pub armed: bool,
+    pub sequence: MidiSequence,
     id: TrackId,
     output_level: f64,
     plugins: Vec<PluginInstance>,
+    midi_scratch: Vec<(usize, MidiMessage<'static>)>,
 }
 
 impl std::fmt::Debug for Track {
@@ -29,9 +37,11 @@ impl Track {
         Self {
             volume: 1.0,
             armed: false,
+            sequence: MidiSequence::new(),
             id: Id::new(),
             output_level: 0.0,
             plugins: Vec::with_capacity(8),
+            midi_scratch: Vec::with_capacity(MIDI_SCRATCH_CAPACITY),
         }
     }
 
@@ -85,10 +95,68 @@ impl Track {
         buffers: [&'buffers mut [f32]; 4],
         sample_rate: u32,
     ) -> [&'buffers mut [f32]; 2] {
+        Self::process_plugins(
+            &mut self.plugins,
+            &mut self.output_level,
+            midi,
+            input,
+            buffers,
+            sample_rate,
+        )
+    }
+
+    /// Plays back recorded sequence events along `beats`, merges live `midi_input` when
+    /// armed, renders the plugin chain, and overdubs live `midi_input` when `recording`.
+    pub(crate) fn process_block<'buffers>(
+        &mut self,
+        beats: &[Beat],
+        recording: bool,
+        midi_input: &[(usize, MidiMessage<'static>)],
+        input: [&[f32]; 2],
+        buffers: [&'buffers mut [f32]; 4],
+        sample_rate: u32,
+    ) -> [&'buffers mut [f32]; 2] {
+        let live_midi = if self.armed { midi_input } else { &[] };
+        let stationary = beats.len() < 2 || beats[0] == beats[1];
+        let output = if self.sequence.is_empty() || stationary {
+            Self::process_plugins(
+                &mut self.plugins,
+                &mut self.output_level,
+                live_midi,
+                input,
+                buffers,
+                sample_rate,
+            )
+        } else {
+            self.sequence
+                .collect_events(beats, live_midi, &mut self.midi_scratch);
+            Self::process_plugins(
+                &mut self.plugins,
+                &mut self.output_level,
+                &self.midi_scratch,
+                input,
+                buffers,
+                sample_rate,
+            )
+        };
+        if recording && self.armed {
+            self.sequence.record_events(beats, live_midi);
+        }
+        output
+    }
+
+    fn process_plugins<'buffers>(
+        plugins: &mut [PluginInstance],
+        output_level: &mut f64,
+        midi: &[(usize, MidiMessage)],
+        input: [&[f32]; 2],
+        buffers: [&'buffers mut [f32]; 4],
+        sample_rate: u32,
+    ) -> [&'buffers mut [f32]; 2] {
         let [left, right, scratch_left, scratch_right] = buffers;
         let mut output = [left, right];
         let mut scratch = [scratch_left, scratch_right];
-        if let Some((first, remaining)) = self.plugins.split_first_mut() {
+        if let Some((first, remaining)) = plugins.split_first_mut() {
             let [left, right] = output.each_mut();
             first.process(midi, input, [left, right]);
             for plugin in remaining {
@@ -111,8 +179,8 @@ impl Track {
                 .map(|channel| channel.len())
                 .max()
                 .unwrap_or(0);
-            self.output_level +=
-                (f64::from(peak) - self.output_level) * output_level_weight(frames, sample_rate);
+            *output_level +=
+                (f64::from(peak) - *output_level) * output_level_weight(frames, sample_rate);
         }
         output
     }

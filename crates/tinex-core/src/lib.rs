@@ -5,11 +5,13 @@ use wmidi::MidiMessage;
 
 use crate::track::Track;
 pub use message::{TinexNotification, TinexRequest, TransportChange};
+pub use sequence::{MidiEvent, MidiSequence};
 pub use transport::{Beat, TimeSignature, Transport};
 
 pub mod id;
 mod message;
 pub mod plugin;
+pub mod sequence;
 pub mod track;
 mod transport;
 
@@ -59,8 +61,7 @@ impl Tinex {
         for channel in args.output.iter_mut() {
             channel.fill(0.0);
         }
-        // Tracks do not consume beats yet, but computing them advances the transport.
-        let _beats = self.transport.compute_beat_at_frame(
+        let beats = self.transport.compute_beat_at_frame(
             args.output[0].len(),
             args.sample_rate,
             args.arena,
@@ -68,15 +69,17 @@ impl Tinex {
         if self.tracks.is_empty() {
             return;
         }
-        // Output and scratch channels handed to `Track::process`, reused by every track.
+        let recording = self.transport.playing && self.transport.recording;
+        // Output and scratch channels handed to `Track::process_block`, reused by every track.
         let mut buffers: [&mut [f32]; 4] = std::array::from_fn(|index| {
             args.arena
                 .alloc_slice_fill_copy(args.output[index % 2].len(), 0.0)
         });
         for track in self.tracks.iter_mut() {
-            let midi_input = if track.armed { args.midi_input } else { &[] };
-            let output = track.process(
-                midi_input,
+            let output = track.process_block(
+                beats,
+                recording,
+                args.midi_input,
                 args.input,
                 buffers.each_mut().map(|channel| &mut **channel),
                 args.sample_rate,
@@ -1318,6 +1321,117 @@ mod tests {
         ] if armed.len() == 2 && armed.contains(&id) && armed.contains(&unknown)
             && disarmed.is_empty()));
         assert!(process(&mut tinex, &received).is_empty());
+    }
+
+    #[test]
+    fn records_armed_tracks_overdubs_across_loops_and_replays_when_disarmed() {
+        let (sender, receiver) = mpsc::channel();
+        let (notifications, received) = mpsc::channel();
+        let mut tinex = Tinex::new(receiver, notifications);
+        // 1 bar of 4/4 at 60 bpm and 1 Hz is 4 beats (1 beat per frame).
+        tinex.transport.measures = 1;
+        tinex.transport.bpm = 60.0;
+
+        let (armed, armed_seen) = new_recorder(1.0);
+        let armed_id = armed.id();
+        let (unarmed, unarmed_seen) = new_recorder(1.0);
+        sender.send(TinexRequest::NewTrack(armed)).unwrap();
+        sender.send(TinexRequest::NewTrack(unarmed)).unwrap();
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::from([armed_id])))
+            .unwrap();
+
+        let note_c = MidiMessage::NoteOn(Channel::Ch1, Note::C4, U7::try_from(100).unwrap());
+        let note_e = MidiMessage::NoteOn(Channel::Ch1, Note::E4, U7::try_from(100).unwrap());
+        let note_g = MidiMessage::NoteOn(Channel::Ch1, Note::G4, U7::try_from(100).unwrap());
+        let arena = bumpalo::Bump::new();
+        let mut left = [0.0; 4];
+        let mut right = [0.0; 4];
+
+        // While stopped, live MIDI is monitored on the armed track but not recorded.
+        sender
+            .send(TinexRequest::SetTransport(TransportChange {
+                recording: Some(true),
+                ..TransportChange::default()
+            }))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 1,
+            input: [&[], &[]],
+            midi_input: &[(0, note_c.clone())],
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        assert_eq!(*armed_seen.0.lock().unwrap(), [(0, note_c.clone())]);
+        assert!(tinex.tracks[0].sequence.is_empty());
+
+        // Pass 1 (4 frames = 1 full bar): record C4 at beat 0 and E4 at beat 2.
+        sender
+            .send(TinexRequest::SetTransport(TransportChange {
+                playing: Some(true),
+                recording: Some(true),
+                ..TransportChange::default()
+            }))
+            .unwrap();
+        let first_pass = [(0, note_c.clone()), (2, note_e.clone())];
+        tinex.process(ProcessArgs {
+            sample_rate: 1,
+            input: [&[], &[]],
+            midi_input: &first_pass,
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        // Live events are heard once during recording, and the unarmed track stays empty.
+        assert_eq!(*armed_seen.0.lock().unwrap(), first_pass);
+        assert!(unarmed_seen.0.lock().unwrap().is_empty());
+        assert!(tinex.tracks[1].sequence.is_empty());
+
+        // Pass 2: overdub G4 at beat 0 and C4 at beat 1.
+        let second_pass = [(0, note_g.clone()), (1, note_c.clone())];
+        tinex.process(ProcessArgs {
+            sample_rate: 1,
+            input: [&[], &[]],
+            midi_input: &second_pass,
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        assert_eq!(
+            *armed_seen.0.lock().unwrap(),
+            [
+                (0, note_c.clone()),
+                (0, note_g.clone()),
+                (1, note_c.clone()),
+                (2, note_e.clone()),
+            ]
+        );
+
+        // Pass 3: disarm and stop recording; the overdubbed sequence still plays back.
+        sender
+            .send(TinexRequest::ArmTracks(HashSet::new()))
+            .unwrap();
+        sender
+            .send(TinexRequest::SetTransport(TransportChange {
+                recording: Some(false),
+                ..TransportChange::default()
+            }))
+            .unwrap();
+        tinex.process(ProcessArgs {
+            sample_rate: 1,
+            input: [&[], &[]],
+            midi_input: &[(3, note_e.clone())],
+            output: [&mut left, &mut right],
+            arena: &arena,
+        });
+        assert_eq!(
+            *armed_seen.0.lock().unwrap(),
+            [
+                (0, note_c.clone()),
+                (0, note_g),
+                (1, note_c),
+                (2, note_e),
+            ]
+        );
+        let _ = received.try_iter().count();
     }
 
     #[test]

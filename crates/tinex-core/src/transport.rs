@@ -26,8 +26,8 @@ impl Default for TimeSignature {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Beat(f64);
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct Beat(pub(crate) f64);
 
 impl Beat {
     /// The start of the arrangement.
